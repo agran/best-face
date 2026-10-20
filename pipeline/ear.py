@@ -65,6 +65,8 @@ class EarEstimator:
             opts = FaceLandmarkerOptions(
                 base_options=base_opts,
                 num_faces=1,
+                output_face_blendshapes=True,
+                output_facial_transformation_matrixes=True,
                 min_face_detection_confidence=0.3,
                 min_face_presence_confidence=0.3,
                 min_tracking_confidence=0.3,
@@ -80,23 +82,28 @@ class EarEstimator:
     def available(self) -> bool:
         return self._available
 
-    def estimate(
+    def analyze(
         self,
         img_bgr: np.ndarray,
         face_bbox: Optional[Tuple[int, int, int, int]] = None,
-    ) -> Optional[float]:
+    ) -> Optional[dict]:
         """
-        Вычислить среднее EAR для двух глаз.
+        Разобрать лицо через MediaPipe FaceLandmarker.
 
         img_bgr    — исходное BGR изображение
         face_bbox  — (x, y, w, h) для обрезки ROI (ускоряет инференс)
 
-        Возвращает float EAR (0≈closed, 0.30≈open) или None при ошибке.
+        Возвращает dict или None при ошибке:
+          ear          — среднее EAR двух глаз (0≈closed, 0.30≈open)
+          blink        — среднее eyeBlinkLeft/Right [0..1] (1 = глаз закрыт)
+          jaw_open     — jawOpen [0..1]
+          smile        — среднее mouthSmileLeft/Right [0..1]
+          yaw/pitch/roll — поворот головы в градусах (из матрицы трансформации)
         """
         if not self._available:
             return None
 
-        # Вырезаем ROI с запасом 30% для надёжного детектирования
+        # Вырезаем ROI с запасом 35% для надёжного детектирования
         if face_bbox is not None:
             x, y, w, h = face_bbox
             pad = int(max(w, h) * 0.35)
@@ -121,9 +128,35 @@ class EarEstimator:
         lms = result.face_landmarks[0]
         pts = np.array([[lm.x * W_roi, lm.y * H_roi] for lm in lms], dtype=np.float32)
 
-        ear_r = _ear_from_6pts(pts[_RIGHT_EYE_IDX])
-        ear_l = _ear_from_6pts(pts[_LEFT_EYE_IDX])
-        return (ear_r + ear_l) / 2.0
+        out = {
+            'ear': (_ear_from_6pts(pts[_RIGHT_EYE_IDX]) + _ear_from_6pts(pts[_LEFT_EYE_IDX])) / 2.0,
+            'blink': None, 'jaw_open': None, 'smile': None,
+            'yaw': None, 'pitch': None, 'roll': None,
+        }
+
+        if result.face_blendshapes:
+            bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
+            out['blink'] = (bs.get('eyeBlinkLeft', 0.0) + bs.get('eyeBlinkRight', 0.0)) / 2.0
+            out['jaw_open'] = bs.get('jawOpen', 0.0)
+            out['smile'] = (bs.get('mouthSmileLeft', 0.0) + bs.get('mouthSmileRight', 0.0)) / 2.0
+
+        if result.facial_transformation_matrixes:
+            R = np.asarray(result.facial_transformation_matrixes[0], dtype=np.float64)[:3, :3]
+            R = R / np.maximum(np.linalg.norm(R, axis=0), 1e-9)
+            out['yaw']   = float(np.degrees(np.arctan2(R[0, 2], R[2, 2])))
+            out['pitch'] = float(np.degrees(np.arcsin(np.clip(-R[1, 2], -1.0, 1.0))))
+            out['roll']  = float(np.degrees(np.arctan2(R[1, 0], R[1, 1])))
+
+        return out
+
+    def estimate(
+        self,
+        img_bgr: np.ndarray,
+        face_bbox: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Optional[float]:
+        """Среднее EAR двух глаз или None (совместимость; см. analyze())."""
+        info = self.analyze(img_bgr, face_bbox)
+        return None if info is None else info['ear']
 
     def ear_to_score(self, ear_value: float) -> float:
         """Нормировать EAR → [0, 1]. EAR=0.30 → 1.0, EAR=0.174 → 0.58 (порог)."""

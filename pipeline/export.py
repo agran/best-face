@@ -12,6 +12,7 @@ import os
 import json
 import shutil
 import html as html_mod
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
@@ -74,6 +75,7 @@ def build_report(
     scored_map: dict,
     rejected_frames: List[FrameRecord],
     params: dict,
+    close_call_margin: float = 0.02,
 ) -> dict:
     """Построить структуру отчёта."""
     persons = []
@@ -104,6 +106,7 @@ def build_report(
                 'rejected_reason': r['rejected_reason'],
                 'yaw_deg':         round(f.yaw_deg, 1),
                 'frontal_ratio':   round(f.frontal_ratio, 3),
+                'pitch_deg':       round(f.pitch_deg, 1) if f.pitch_deg is not None else None,
                 'det_conf':        round(f.det_conf, 3),
                 'gender':          _gender_str(f.gender),
                 'age':             round(f.age, 1) if f.age is not None else None,
@@ -115,12 +118,17 @@ def build_report(
 
         all_low_quality = len(all_passed) == 0 and len(scored) > 0
 
+        # Два лучших кадра почти равны по score — выбор неуверенный, стоит глянуть руками
+        pool = all_passed if all_passed else scored
+        close_call = len(pool) >= 2 and (pool[0]['score'] - pool[1]['score']) < close_call_margin
+
         persons.append({
             'person_id':       cluster.person_id,
             'frame_count':     len(cluster.frames),
             'best_photo':      best_file,
             'best_score':      round(best_score, 4),
             'low_quality_flag': all_low_quality,
+            'close_call':      close_call,
             'mean_similarity': round(cluster.mean_sim, 4) if cluster.mean_sim is not None else None,
             'low_cohesion':    cluster.low_cohesion,
             'frames':          frames_info,
@@ -138,6 +146,7 @@ def build_report(
             'total_rejected':  len(rejected_frames),
             'low_quality_persons': sum(1 for p in persons if p['low_quality_flag']),
             'low_cohesion_persons': sum(1 for p in persons if p['low_cohesion']),
+            'close_call_persons': sum(1 for p in persons if p['close_call']),
         },
         'params':   params,
         'persons':  persons,
@@ -209,23 +218,72 @@ _HTML_HEAD = """<!DOCTYPE html>
   .person-header .pid { color:#8cf; }
   .person-header .cnt { color:#aaa; font-weight:normal; font-size:12px; margin-left:8px; }
   .person-header .low { color:#f88; font-size:11px; margin-left:8px; }
+  .person-header .doubt { color:#fb4; font-size:11px; margin-left:8px; }
   .frames { display:flex; flex-wrap:wrap; gap:8px; padding:12px; }
-  .frame { position:relative; border-radius:4px; overflow:hidden; cursor:default; }
+  .frame { position:relative; border-radius:4px; overflow:hidden; cursor:pointer; }
   .frame img { display:block; border-radius:4px; object-fit:cover; }
   .frame.best { outline:3px solid #4f4; }
+  .frame.chosen { outline:3px solid #4af; }
+  .frame.chosen.best { outline:3px solid #4af; box-shadow:0 0 0 3px #4f4; }
   .frame.rejected { opacity:0.45; outline:1px solid #f44; }
+  .frame .open { position:absolute; top:2px; right:2px; background:rgba(0,0,0,0.6);
+                 color:#fff; text-decoration:none; font-size:12px; padding:1px 5px;
+                 border-radius:3px; }
   .frame .badge { position:absolute; bottom:0; left:0; right:0;
                   background:rgba(0,0,0,0.72); font-size:10px; padding:2px 4px;
                   text-align:center; }
   .frame.best .badge { color:#4f4; }
+  .frame.chosen .badge { color:#4af; }
   .frame.rejected .badge { color:#f88; }
   .score { color:#fda; }
+  .toolbar { position:sticky; top:0; z-index:10; background:#111; padding:8px 12px;
+             border-bottom:1px solid #444; margin:-16px -16px 16px; font-size:13px; }
+  .toolbar button, .toolbar label { margin-right:14px; }
+  body.only-doubt .person[data-doubt="0"] { display:none; }
 </style>
 </head>
 <body>
+<div class="toolbar">
+  <label><input type="checkbox" id="onlyDoubt"> только сомнительные</label>
+  <span>Выбрано вручную: <b id="cnt">0</b></span>
+  <button id="save">Скачать manual_choices.json</button>
+  <button id="reset">Сбросить выбор</button>
+  <span style="color:#888">клик по превью — выбрать лучший кадр вручную, ↗ — открыть оригинал</span>
+</div>
 """
 
-_HTML_TAIL = "</body></html>\n"
+_HTML_TAIL = """<script>
+const KEY = 'bestface:' + location.pathname;
+let choices = JSON.parse(localStorage.getItem(KEY) || '{}');
+function apply() {
+  document.querySelectorAll('.frame').forEach(f => {
+    const p = f.closest('.person').dataset.person;
+    f.classList.toggle('chosen', choices[p] === f.dataset.file);
+  });
+  document.getElementById('cnt').textContent = Object.keys(choices).length;
+}
+document.addEventListener('click', e => {
+  const f = e.target.closest('.frame');
+  if (!f || e.target.closest('a')) return;
+  const p = f.closest('.person').dataset.person;
+  if (choices[p] === f.dataset.file) delete choices[p]; else choices[p] = f.dataset.file;
+  localStorage.setItem(KEY, JSON.stringify(choices));
+  apply();
+});
+document.getElementById('onlyDoubt').addEventListener('change', e =>
+  document.body.classList.toggle('only-doubt', e.target.checked));
+document.getElementById('reset').addEventListener('click', () => {
+  choices = {}; localStorage.removeItem(KEY); apply();
+});
+document.getElementById('save').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({choices}, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'manual_choices.json'; a.click();
+});
+apply();
+</script>
+</body></html>
+"""
 
 
 def build_contact_sheet(
@@ -238,13 +296,27 @@ def build_contact_sheet(
 ) -> None:
     """
     Сгенерировать HTML-контактный лист с превью всех серий.
-    Превью (кропы лиц) сохраняются файлами в <имя_листа>_thumbs/ рядом с HTML;
-    клик по превью открывает исходное фото.
+    Превью (кропы лиц) сохраняются файлами в <имя_листа>_thumbs/ рядом с HTML.
+    Клик по превью выбирает кадр вручную (сохраняется в браузере; выбор можно
+    скачать как manual_choices.json для tune_weights.py), ↗ открывает оригинал.
     """
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     thumbs_dir = Path(output_file).with_suffix('')
     thumbs_dir = thumbs_dir.parent / (thumbs_dir.name + '_thumbs')
     thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Превью считаются параллельно: декодирование крупных JPEG — самая медленная часть
+    jobs = []
+    for cluster in clusters:
+        for r in scored_map.get(cluster.person_id, []):
+            f_rec = r['frame']
+            name = f'p{cluster.person_id:04d}_{f_rec.file_idx:05d}.jpg'
+            jobs.append((f_rec.path, f_rec.bbox, str(thumbs_dir / name)))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        thumb_ok = dict(zip(
+            (j[2] for j in jobs),
+            pool.map(lambda j: _write_thumb(j[0], j[1], j[2], thumb_size), jobs),
+        ))
 
     parts = [_HTML_HEAD]
     s = report.get('summary', {})
@@ -265,14 +337,22 @@ def build_contact_sheet(
         )
         best_file = person_data['best_photo'] if person_data else None
         low_q = person_data and person_data['low_quality_flag']
+        doubt_reasons = []
+        if low_q:
+            doubt_reasons.append('⚠ низкое качество')
+        if person_data and person_data.get('low_cohesion'):
+            doubt_reasons.append('⚠ возможна склейка разных людей')
+        if person_data and person_data.get('close_call'):
+            doubt_reasons.append('⚖ два кадра почти равны')
 
-        low_badge = '<span class="low">⚠ низкое качество</span>' if low_q else ''
+        badges = ''.join(f'<span class="doubt">{r}</span>' for r in doubt_reasons)
         parts.append(
-            f'<div class="person">'
+            f'<div class="person" data-person="{cluster.person_id}" '
+            f'data-doubt="{1 if doubt_reasons else 0}">'
             f'<div class="person-header">'
-            f'<span class="pid">Персона #{cluster.person_id}</span>'
+            f'<span class="pid">Серия #{cluster.person_id}</span>'
             f'<span class="cnt">{len(cluster.frames)} кадров</span>'
-            f'{low_badge}'
+            f'{badges}'
             f'</div>'
             f'<div class="frames">'
         )
@@ -287,8 +367,7 @@ def build_contact_sheet(
             css_cls = 'frame ' + css_cls
 
             thumb_name = f'p{cluster.person_id:04d}_{f_rec.file_idx:05d}.jpg'
-            has_thumb = _write_thumb(f_rec.path, f_rec.bbox,
-                                     str(thumbs_dir / thumb_name), thumb_size)
+            has_thumb = thumb_ok.get(str(thumbs_dir / thumb_name), False)
             if has_thumb:
                 rel = f'{thumbs_dir.name}/{thumb_name}'
                 img_tag = (f'<img src="{rel}" width="{thumb_size}" '
@@ -304,8 +383,10 @@ def build_contact_sheet(
                          (reason if reason else f'<span class="score">{score_str}</span>'))
 
             parts.append(
-                f'<div class="{css_cls}" title="{html_mod.escape(fname)}">'
-                f'<a href="{href}" target="_blank">{img_tag}</a>'
+                f'<div class="{css_cls}" title="{html_mod.escape(fname)}" '
+                f'data-file="{html_mod.escape(fname)}">'
+                f'{img_tag}'
+                f'<a class="open" href="{href}" target="_blank" title="Открыть оригинал">↗</a>'
                 f'<div class="badge">{label}</div>'
                 f'</div>'
             )

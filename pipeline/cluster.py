@@ -34,6 +34,7 @@ class FrameRecord:
         'gender', 'age',             # из Human FaceRes
         'metrics',                   # dict Q1-Q9 (Q8 = 0.0 пока)
         'yaw_deg', 'frontal_ratio',  # геометрия позы
+        'pitch_deg', 'roll_deg',     # поза из MediaPipe (None, если недоступна)
         'rejected_reason',           # str или None
     )
 
@@ -51,6 +52,8 @@ class FrameRecord:
         self.metrics        = {}
         self.yaw_deg        = 0.0
         self.frontal_ratio  = 1.0
+        self.pitch_deg      = None
+        self.roll_deg       = None
         self.rejected_reason = None
 
 
@@ -143,6 +146,73 @@ def _proximity_masks(valid: List[FrameRecord], time_window: int, time_window_sec
     return near, far
 
 
+def _segment_by_time(valid: List[FrameRecord], gap_sec: float) -> List[List[int]]:
+    """
+    Разрезать кадры (в порядке файлов) на серии по паузам в съёмке: если между
+    соседними кадрами с EXIF-временем пауза больше gap_sec — начинается новая серия.
+    Кадры без EXIF-времени серию не разрывают.
+    """
+    order = sorted(range(len(valid)), key=lambda i: valid[i].file_idx)
+    segments: List[List[int]] = [[order[0]]]
+    for a, b in zip(order, order[1:]):
+        ta, tb = valid[a].shot_time, valid[b].shot_time
+        if ta is not None and tb is not None and abs(tb - ta) > gap_sec:
+            segments.append([])
+        segments[-1].append(b)
+    return segments
+
+
+def _cluster_by_identity(
+    frames: List[FrameRecord],
+    threshold: float,
+    time_window: int,
+    threshold_time: float,
+    time_window_sec: float,
+    time_far_sec: float,
+    time_far_penalty: float,
+    min_cohesion: float,
+    split_step: float,
+    max_split_rounds: int,
+):
+    """Кластеризация одного набора кадров по лицу. Возвращает список (кадры, low_cohesion)."""
+    n = len(frames)
+    if n == 1:
+        return [([frames[0]], False)]
+
+    embs = np.stack([f.emb_arc for f in frames])  # (n, 512)
+    sim = embs @ embs.T
+
+    near, far = _proximity_masks(frames, time_window, time_window_sec, time_far_sec)
+    bonus = max(0.0, threshold - threshold_time)
+    dist = 1.0 - (sim + bonus * near - time_far_penalty * far)
+
+    groups: List[tuple] = []
+
+    def cohesion(positions: List[int]) -> float:
+        k = len(positions)
+        if k < 2:
+            return 1.0
+        s = sim[np.ix_(positions, positions)]
+        return float((s.sum() - np.trace(s)) / (k * (k - 1)))
+
+    def split(positions: List[int], level: int):
+        if min_cohesion <= 0 or cohesion(positions) >= min_cohesion:
+            groups.append(([frames[p] for p in positions], False))
+            return
+        if level >= max_split_rounds:
+            groups.append(([frames[p] for p in positions], True))
+            return
+        thr = threshold + split_step * (level + 1)
+        sub = _agglomerate(dist[np.ix_(positions, positions)], 1.0 - thr)
+        for lbl in sorted(set(sub.tolist())):
+            split([positions[i] for i in np.where(sub == lbl)[0]], level + 1)
+
+    labels = _agglomerate(dist, 1.0 - threshold)
+    for lbl in sorted(set(labels.tolist())):
+        split([int(i) for i in np.where(labels == lbl)[0]], 0)
+    return groups
+
+
 def cluster_frames(
     frames: List[FrameRecord],
     threshold:          float = 0.50,
@@ -154,9 +224,11 @@ def cluster_frames(
     min_cohesion:       float = 0.0,
     split_step:         float = 0.03,
     max_split_rounds:   int   = 6,
+    mode:               str   = 'person',
+    series_gap_sec:     float = 14.0,
 ) -> List[PersonCluster]:
     """
-    Сгруппировать кадры в кластеры личностей.
+    Сгруппировать кадры в кластеры.
 
     frames            — список FrameRecord (только с валидными emb_arc).
     threshold         — средний cosine между кластерами для «один человек».
@@ -168,61 +240,39 @@ def cluster_frames(
     min_cohesion      — если > 0, кластеры со средним cosine внутри ниже этого значения дробятся строже.
     split_step        — шаг повышения порога при дроблении.
     max_split_rounds  — максимум шагов дробления.
+    mode              — 'person': один кластер на человека во всей папке;
+                        'series': сначала разрез на серии по паузам в съёмке
+                        (series_gap_sec), затем кластеризация по лицу внутри серии.
+    series_gap_sec    — пауза между соседними кадрами, начинающая новую серию.
 
     Возвращает список PersonCluster, отсортированных по убыванию числа кадров.
     """
     valid = [f for f in frames if f.emb_arc is not None]
-    n = len(valid)
-    if n == 0:
+    if not valid:
         return []
 
-    embs = np.stack([f.emb_arc for f in valid])  # (n, 512)
-    sim = embs @ embs.T
-
-    near, far = _proximity_masks(valid, time_window, time_window_sec, time_far_sec)
-    bonus = max(0.0, threshold - threshold_time)
-    adj = sim + bonus * near - time_far_penalty * far
-    dist = 1.0 - adj
-
-    labels = _agglomerate(dist, 1.0 - threshold)
-
-    groups: List[List[int]] = []
-    loose_flags: List[bool] = []
-
-    def cohesion(positions: List[int]) -> float:
-        k = len(positions)
-        if k < 2:
-            return 1.0
-        s = sim[np.ix_(positions, positions)]
-        return float((s.sum() - np.trace(s)) / (k * (k - 1)))
-
-    def split(positions: List[int], level: int):
-        if min_cohesion <= 0 or cohesion(positions) >= min_cohesion:
-            groups.append(positions)
-            loose_flags.append(False)
-            return
-        if level >= max_split_rounds:
-            groups.append(positions)
-            loose_flags.append(True)
-            return
-        thr = threshold + split_step * (level + 1)
-        sub = _agglomerate(dist[np.ix_(positions, positions)], 1.0 - thr)
-        for lbl in sorted(set(sub.tolist())):
-            split([positions[i] for i in np.where(sub == lbl)[0]], level + 1)
-
-    for lbl in sorted(set(labels.tolist())):
-        split([int(i) for i in np.where(labels == lbl)[0]], 0)
+    if mode == 'series':
+        segments = [[valid[i] for i in seg] for seg in _segment_by_time(valid, series_gap_sec)]
+    else:
+        segments = [valid]
 
     clusters = []
-    for positions, loose in zip(groups, loose_flags):
-        cluster = PersonCluster(0)
-        cluster.frames = [valid[p] for p in sorted(positions, key=lambda p: valid[p].file_idx)]
-        cluster.low_cohesion = loose
-        cluster.compute_centroids()
-        clusters.append(cluster)
+    for seg in segments:
+        groups = _cluster_by_identity(
+            seg, threshold, time_window, threshold_time, time_window_sec,
+            time_far_sec, time_far_penalty, min_cohesion, split_step, max_split_rounds,
+        )
+        for group_frames, loose in groups:
+            cluster = PersonCluster(0)
+            cluster.frames = sorted(group_frames, key=lambda f: f.file_idx)
+            cluster.low_cohesion = loose
+            cluster.compute_centroids()
+            clusters.append(cluster)
 
     clusters.sort(key=lambda c: len(c.frames), reverse=True)
     for new_id, cluster in enumerate(clusters, start=1):
         cluster.person_id = new_id
 
     return clusters
+
+

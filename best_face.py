@@ -15,6 +15,8 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +36,7 @@ from pipeline.embed   import ArcFaceEmbedder, FaceResEmbedder, NimaScorer, estim
 from pipeline.ear     import EarEstimator
 from pipeline.metrics import compute_all_metrics
 from pipeline.cluster import FrameRecord, cluster_frames
+from pipeline.cache   import FrameCache, make_signature, file_fingerprint
 from pipeline.exif    import read_shot_time
 from pipeline.score   import score_cluster, pick_best
 from pipeline.export  import (
@@ -105,6 +108,20 @@ def scan_photos(folder: str) -> list:
 
 # ─── Обработка одного файла ────────────────────────────────────────────────────
 
+def load_image(path: str):
+    """Прочитать и декодировать файл. Возвращает (img_bgr, shot_time) или (None, None)."""
+    try:
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+        # cv2.imread не поддерживает кириллицу в путях на Windows — декодируем из буфера
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        return None, None
+    if img is None:
+        return None, None
+    return img, read_shot_time(raw)
+
+
 def process_one(
     path: str,
     file_idx: int,
@@ -115,25 +132,21 @@ def process_one(
     ear_estimator: EarEstimator,
     cfg_det: dict,
     multi_face_policy: str = 'largest',
+    loaded: tuple = None,
 ) -> FrameRecord:
     """
     Обработать один файл: детекция → alignment → embedding → метрики.
     Возвращает FrameRecord (rejected_reason != None если нет лица).
+    loaded — уже декодированный (img, shot_time) из load_image (предзагрузка в потоках).
     """
     rec = FrameRecord(path, file_idx)
 
-    # Чтение изображения (cv2.imread не поддерживает кириллицу в путях на Windows)
-    try:
-        with open(path, 'rb') as fh:
-            raw = fh.read()
-        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
-    except Exception:
-        raw, img = None, None
+    img, shot_time = loaded if loaded is not None else load_image(path)
     if img is None:
         rec.rejected_reason = 'read_error'
         return rec
 
-    rec.shot_time = read_shot_time(raw)
+    rec.shot_time = shot_time
 
     # Детекция
     faces = detector.detect(img, min_face_px=cfg_det.get('min_face_px', 50))
@@ -147,7 +160,7 @@ def process_one(
     rec.kps      = face.kps
     rec.det_conf = face.conf
 
-    # Геометрия позы
+    # Геометрия позы (по 5 точкам; ниже уточняется MediaPipe, если доступен)
     rec.yaw_deg      = estimate_yaw_deg(face.kps)
     rec.frontal_ratio = estimate_frontal_ratio(face.kps)
 
@@ -172,8 +185,13 @@ def process_one(
     else:
         rec.emb_res = rec.emb_arc
 
-    # EAR (Eye Aspect Ratio) через MediaPipe если доступен
-    ear_val = ear_estimator.estimate(img, face.bbox) if ear_estimator.available else None
+    # MediaPipe: EAR, blendshapes (глаза/рот) и поза головы
+    pose_info = ear_estimator.analyze(img, face.bbox) if ear_estimator.available else None
+    ear_val = pose_info['ear'] if pose_info else None
+    if pose_info and pose_info['yaw'] is not None:
+        rec.yaw_deg   = pose_info['yaw']
+        rec.pitch_deg = pose_info['pitch']
+        rec.roll_deg  = pose_info['roll']
 
     # Метрики качества Q1-Q7
     rec.metrics = compute_all_metrics(
@@ -184,6 +202,8 @@ def process_one(
         det_conf=face.conf,
         frontal_ratio=rec.frontal_ratio,
         ear_value=ear_val,
+        face_crop_224=crop_224,
+        pose_info=pose_info,
     )
 
     # Q9: NIMA aesthetic score если модель загружена, иначе q9_face_illumination из compute_all_metrics
@@ -230,6 +250,8 @@ def main():
                         help='Обработать только первые N фото (0 = все)')
     parser.add_argument('--no-contact-sheet', action='store_true',
                         help='Не генерировать HTML-контактный лист')
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Не использовать кэш обработанных кадров (frame_cache.pkl)')
     args = parser.parse_args()
 
     # ── Конфиг ──────────────────────────────────────────────────────────────
@@ -275,20 +297,25 @@ def main():
         print(f'ОШИБКА: multi_face_policy={policy!r}, допустимо: {_MULTI_FACE_POLICIES}')
         sys.exit(2)
 
+    det_path      = resolve_model_path(cfg_models['detector'], 'detector')
+    arc_path      = resolve_model_path(cfg_models['arcface'], 'arcface')
+    faceres_path  = resolve_model_path(cfg_models.get('faceres'), 'faceres', required=False)
+    nima_path     = resolve_model_path(cfg_models.get('nima'), 'nima', required=False)
+    ear_path      = resolve_model_path(
+        cfg_models.get('ear', 'models/face_landmarker.task'), 'ear', required=False)
+
     detector     = FaceDetector(
-        model_path      = resolve_model_path(cfg_models['detector'], 'detector'),
+        model_path      = det_path,
         conf_threshold  = cfg_det.get('conf_threshold', 0.5),
         nms_threshold   = cfg_det.get('nms_threshold',  0.4),
         max_det_size    = cfg_det.get('max_det_size',   1280),
     )
-    embedder_arc  = ArcFaceEmbedder(resolve_model_path(cfg_models['arcface'], 'arcface'))
-    faceres_path  = resolve_model_path(cfg_models.get('faceres'), 'faceres', required=False)
+    embedder_arc  = ArcFaceEmbedder(arc_path)
     embedder_res  = FaceResEmbedder(faceres_path) if faceres_path else None
     if embedder_res is None:
         print('  FaceResEmbedder:  отключён — Q8 считается по ArcFace')
-    embedder_nima = NimaScorer(resolve_model_path(cfg_models.get('nima'), 'nima', required=False))
-    ear_estimator = EarEstimator(resolve_model_path(
-        cfg_models.get('ear', 'models/face_landmarker.task'), 'ear', required=False))
+    embedder_nima = NimaScorer(nima_path)
+    ear_estimator = EarEstimator(ear_path)
 
     print(f'Модели загружены за {time.time()-t0:.1f}s')
 
@@ -298,30 +325,77 @@ def main():
     all_records: list[FrameRecord] = []
     rejected_records: list[FrameRecord] = []
 
+    cache_sig = make_signature(
+        models=[file_fingerprint(p) for p in (det_path, arc_path, faceres_path, nima_path, ear_path)],
+        detection=cfg_det, policy=policy,
+    )
+    cache = FrameCache(os.path.join(base, 'frame_cache.pkl'), cache_sig,
+                       enabled=not args.no_cache)
+
+    results: dict = {}
+    for idx, path in enumerate(all_photos):
+        cached = cache.get(path)
+        if cached is not None:
+            cached.file_idx = idx
+            results[idx] = cached
+    todo = [i for i in range(len(all_photos)) if i not in results]
+    if results:
+        print(f'  Из кэша: {len(results)} кадров, обработать: {len(todo)}')
+
     if _HAS_TQDM:
         progress = tqdm(total=len(all_photos), desc='Обработка', unit='фото')
     else:
         progress = _SimpleProgress(len(all_photos), 'Обработка')
+    progress.update(len(results))
 
-    for idx, path in enumerate(all_photos):
-        rec = process_one(
-            path=path,
-            file_idx=idx,
-            detector=detector,
-            embedder_arc=embedder_arc,
-            embedder_res=embedder_res,
-            embedder_nima=embedder_nima,
-            ear_estimator=ear_estimator,
-            cfg_det=cfg_det,
-            multi_face_policy=policy,
-        )
+    # Чтение и декодирование JPEG идёт в потоках на несколько кадров вперёд,
+    # пока основной поток считает эмбеддинги предыдущего кадра
+    workers = max(1, int(cfg.get('performance', {}).get('workers', 4)))
+    todo_iter = iter(todo)
+    window = deque()
+
+    def submit_next(pool):
+        i = next(todo_iter, None)
+        if i is not None:
+            window.append((i, pool.submit(load_image, all_photos[i])))
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for _ in range(workers * 2):
+                submit_next(pool)
+            done = 0
+            while window:
+                idx, fut = window.popleft()
+                submit_next(pool)
+                rec = process_one(
+                    path=all_photos[idx],
+                    file_idx=idx,
+                    detector=detector,
+                    embedder_arc=embedder_arc,
+                    embedder_res=embedder_res,
+                    embedder_nima=embedder_nima,
+                    ear_estimator=ear_estimator,
+                    cfg_det=cfg_det,
+                    multi_face_policy=policy,
+                    loaded=fut.result(),
+                )
+                results[idx] = rec
+                cache.put(all_photos[idx], rec)
+                progress.update(1)
+                done += 1
+                if done % 200 == 0:
+                    cache.save()
+    finally:
+        cache.save()
+
+    progress.close()
+
+    for idx in range(len(all_photos)):
+        rec = results[idx]
         if rec.rejected_reason is not None:
             rejected_records.append(rec)
         else:
             all_records.append(rec)
-        progress.update(1)
-
-    progress.close()
 
     n_valid    = len(all_records)
     n_rejected = len(rejected_records)
@@ -335,6 +409,10 @@ def main():
     # ── Кластеризация ───────────────────────────────────────────────────────
     print(f'\nШаг 2/3: Кластеризация серий...')
     t1 = time.time()
+    cluster_mode = cfg_cluster.get('mode', 'person')
+    if cluster_mode not in ('person', 'series'):
+        print(f"ОШИБКА: clustering.mode={cluster_mode!r}, допустимо: 'person' | 'series'")
+        sys.exit(2)
 
     clusters = cluster_frames(
         frames           = all_records,
@@ -347,10 +425,16 @@ def main():
         min_cohesion     = cfg_cluster.get('min_cohesion',        0.0),
         split_step       = cfg_cluster.get('split_step',          0.03),
         max_split_rounds = cfg_cluster.get('max_split_rounds',    6),
+        mode             = cluster_mode,
+        series_gap_sec   = cfg_cluster.get('series_gap_sec',      14.0),
     )
 
     n_with_time = sum(1 for r in all_records if r.shot_time is not None)
     print(f'  Кадров с EXIF-временем: {n_with_time}/{len(all_records)}')
+    if cluster_mode == 'series' and n_with_time < 0.9 * len(all_records):
+        print('  [WARN] у большинства кадров нет EXIF-времени — разрез на серии по паузам '
+              'работает частично; для режима «один кластер на человека» задайте '
+              'clustering.mode: person')
     print(f'  Найдено персон: {len(clusters)}  '
           f'(за {time.time()-t1:.1f}s)')
 
@@ -425,6 +509,9 @@ def main():
     if s.get('low_cohesion_persons'):
         print(f'  Серий с низкой связностью: {s["low_cohesion_persons"]} '
               f'(возможна склейка людей — проверьте)')
+    if s.get('close_call_persons'):
+        print(f'  Серий с почти равными кадрами: {s["close_call_persons"]} '
+              f'(в контактном листе фильтр «только сомнительные»)')
     print(f'{"="*50}')
     print(f'  Результаты: {Path(best_dir).parent.resolve()}')
 

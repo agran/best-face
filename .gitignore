@@ -5,6 +5,7 @@ output_*/
 debug_eyes/
 debug_*/
 best_face_output/
+*.pkl
 contact_sheet*/
 
 # Модели и веса (скачиваются отдельно, см. README)

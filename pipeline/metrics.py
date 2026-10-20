@@ -15,11 +15,14 @@ from typing import Tuple
 def q1_sharpness(face_crop: np.ndarray) -> float:
     """
     Q1: Резкость / фокус.
-    Variance of Laplacian на area лица в grayscale.
-    Высокое значение = резкое, низкое = смазанное.
+    Variance of Laplacian по выровненному кропу лица (желательно 224×224 — на
+    112×112 тонкая расфокусировка и лёгкий смаз почти не видны).
+    Лёгкое гауссово сглаживание перед Лапласианом подавляет влияние шума ISO:
+    без него шумный кадр выглядит «резче» чистого.
     Возвращает сырое (ненормированное) значение — нормировка в score.py по серии.
     """
     gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
     lap = cv2.Laplacian(gray, cv2.CV_64F)
     return float(lap.var())
 
@@ -33,7 +36,8 @@ def q2_frontality(kps: np.ndarray) -> float:
     raise NotImplementedError("используй pipeline.align.estimate_frontal_ratio()")
 
 
-def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None) -> float:
+def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None,
+                    blink: float = None) -> float:
     """
     Q3: Открытость глаз.
 
@@ -41,6 +45,8 @@ def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None
         score = min(1.0, ear_value / 0.30)
         EAR~0.28-0.33 = открытый, EAR~0.09-0.15 = закрытый/прищуренный
         Порог min_ear=0.58 → требуется EAR >= 0.174
+    Если дополнительно передан blink (blendshapes eyeBlinkLeft/Right, 1 = закрыт),
+    итог — среднее EAR-оценки и (1 - blink): два независимых признака надёжнее одного.
 
     Иначе — fallback pixel-based (менее надёжен при прищуривании):
     A) pupil_score  — min пикселя в патче: open~10-15 → 0.75-0.83; closed~30-50 → 0.17-0.50.
@@ -51,7 +57,10 @@ def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None
        min(1, std / 35).  Вес: 0.25.
     """
     if ear_value is not None:
-        return min(1.0, max(0.0, ear_value / 0.30))
+        ear_score = min(1.0, max(0.0, ear_value / 0.30))
+        if blink is not None:
+            return 0.5 * ear_score + 0.5 * (1.0 - min(1.0, max(0.0, blink)))
+        return ear_score
     h, w = face_crop.shape[:2]
     if h < 32 or w < 32:
         return 0.5
@@ -98,16 +107,23 @@ def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None
     return normalized
 
 
-def q4_expression_neutrality(face_crop: np.ndarray, kps_orig: np.ndarray) -> float:
+def q4_expression_neutrality(face_crop: np.ndarray, kps_orig: np.ndarray,
+                             jaw_open: float = None, smile: float = None) -> float:
     """
-    Q4: Нейтральность выражения (прокси).
-    Оцениваем по геометрии рта: большое расстояние между уголками рта
-    относительно расстояния глаза-нос → широкая улыбка / открытый рот.
-    Нейтральное лицо: рот относительно закрыт.
+    Q4: Нейтральность выражения.
+
+    Если есть blendshapes MediaPipe (jaw_open, smile ∈ [0, 1]): открытый рот
+    штрафуется сильно (искажает эмбеддинг), улыбка — слабо.
+    Иначе — прокси по геометрии рта из 5 точек: большое расстояние между уголками
+    рта относительно межглазного → широкая улыбка / открытый рот.
 
     kps_orig — 5 точек в оригинальных координатах кадра:
                [re, le, nose, right_mouth, left_mouth]
     """
+    if jaw_open is not None and smile is not None:
+        penalty = min(1.0, max(0.0, jaw_open) / 0.4) + 0.3 * min(1.0, max(0.0, smile))
+        return float(max(0.0, 1.0 - penalty))
+
     right_eye   = kps_orig[0]
     left_eye    = kps_orig[1]
     nose        = kps_orig[2]
@@ -237,19 +253,29 @@ def compute_all_metrics(
     det_conf: float,
     frontal_ratio: float,
     ear_value: float = None,
+    face_crop_224: np.ndarray = None,
+    pose_info: dict = None,
 ) -> dict:
     """
     Рассчитать все метрики Q1-Q9 для одного кадра.
     Q8 (централность) рассчитывается позже в score.py.
     Q9 (NIMA) может быть переопределён в best_face.py если доступна NIMA модель.
 
+    face_crop_224 — выровненный кроп 224×224 (для Q1); без него резкость по 112×112.
+    pose_info     — результат EarEstimator.analyze() (blendshapes) или None.
+
     Возвращает dict с ключами Q1..Q9 и вспомогательными полями.
     """
+    pose_info = pose_info or {}
+    sharp_crop = face_crop_224 if face_crop_224 is not None else face_crop_112
     return {
-        'Q1_sharpness':     q1_sharpness(face_crop_112),      # сырое
+        'Q1_sharpness':     q1_sharpness(sharp_crop),         # сырое
         'Q2_frontality':    float(frontal_ratio),             # [0,1]
-        'Q3_eye_open':      q3_eye_openness(face_crop_112, None, ear_value),
-        'Q4_expression':    q4_expression_neutrality(face_crop_112, kps_orig),
+        'Q3_eye_open':      q3_eye_openness(face_crop_112, None, ear_value,
+                                            pose_info.get('blink')),
+        'Q4_expression':    q4_expression_neutrality(face_crop_112, kps_orig,
+                                                     pose_info.get('jaw_open'),
+                                                     pose_info.get('smile')),
         'Q5_face_size':     q5_face_size(bbox, img_bgr.shape),
         'Q6_exposure':      q6_exposure(face_crop_112),
         'Q7_confidence':    float(det_conf),

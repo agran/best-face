@@ -28,6 +28,7 @@ _DEFAULT_WEIGHTS = {
 
 _DEFAULT_GATES = {
     'max_yaw_deg':       35.0,
+    'max_pitch_deg':     30.0,
     'min_frontal_ratio': 0.45,
     'min_ear':           0.58,
     'min_sharpness_rel': 0.15,
@@ -100,6 +101,9 @@ def score_cluster(
 
         if abs(f.yaw_deg) > gates.get('max_yaw_deg', 35.0):
             rej = 'yaw_too_large'
+
+        if f.pitch_deg is not None and abs(f.pitch_deg) > gates.get('max_pitch_deg', 30.0):
+            rej = rej or 'pitch_too_large'
 
         if f.frontal_ratio < gates.get('min_frontal_ratio', 0.45):
             rej = rej or 'not_frontal'
