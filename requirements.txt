@@ -1,0 +1,10 @@
+opencv-python>=4.5.4
+numpy>=1.21
+onnxruntime-directml>=1.20; sys_platform == "win32"   # Windows: GPU через DirectML (AMD/Intel/NVIDIA). Для CUDA на NVIDIA вместо него — onnxruntime-gpu. Ставить ТОЛЬКО ОДИН onnxruntime-* пакет
+onnxruntime>=1.20; sys_platform != "win32"            # macOS (CoreML) и Linux (CPU; для NVIDIA вручную onnxruntime-gpu)
+Pillow>=9.0
+scikit-learn>=1.0
+scipy>=1.7
+tqdm>=4.60
+PyYAML>=6.0
+mediapipe>=0.10          # EAR-based Q3 (открытость глаз); опционально

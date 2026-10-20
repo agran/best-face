@@ -1,0 +1,71 @@
+# ============================================================
+# Best-Face: конфигурация
+# ============================================================
+
+models:
+  # Скачайте модели в папку models/ (см. README.md)
+  # Детектор лиц (YuNet, cv2.FaceDetectorYN)
+  detector: "models/face_detection_yunet_2023mar.onnx"
+  # ArcFace 512-dim — для группировки серий
+  arcface: "models/w600k_mbf.onnx"
+  # Human FaceRes 1024-dim — метрика «узнаваемости» Q8 (+ пол/возраст).
+  # null — отключить: Q8 тогда считается по ArcFace-эмбеддингам
+  faceres: "models/human_faceres.onnx"
+  # NIMA aesthetic quality scorer (MobileNetV2, обучен на AVA)
+  # Создайте модель: python export_nima.py
+  # null — отключить Q9 (Q8 сохранит вес 0.25)
+  nima: "models/nima_mobilenetv2.onnx"
+  # MediaPipe FaceLandmarker — для надёжного EAR (открытость глаз) через 478 ландмарков
+  # Скачайте вручную (см. README.md):
+  #   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+  # null — отключить (Q3 будет pixel-based, менее надёжный)
+  ear: "models/face_landmarker.task"
+
+detection:
+  conf_threshold: 0.5 # минимальный confidence детектора
+  nms_threshold: 0.4 # NMS IoU (совпадает с Face-ID Kiosk)
+  min_face_px: 50 # минимальный размер лица в пикселях (меньшая сторона bbox)
+  max_det_size: 1280 # на такую ширину масштабируем изображение перед детекцией
+  # Какое лицо брать, если в кадре их несколько: largest | central | best_conf
+  multi_face_policy: largest
+
+clustering:
+  # Порог cosine-сходства ArcFace 512-dim для «один человек».
+  # Кластеризация average-linkage: порог применяется к СРЕДНЕМУ сходству кластеров
+  threshold: 0.50
+  # Временной хинт: кадры, снятые рядом, получают бонус (threshold - threshold_time_hint)
+  time_window_sec: 8.0 # окно «снято рядом» по EXIF DateTimeOriginal, сек
+  time_window_frames: 8 # то же в номерах файлов, если EXIF-времени нет
+  threshold_time_hint: 0.40 # чуть ниже основного: «плохой» кадр той же серии
+  # Кадры, снятые далеко по времени, штрафуются (серия не длится минутами). 0 — отключить
+  time_far_sec: 120.0
+  time_far_penalty: 0.10
+  # Кластеры со средним cosine внутри ниже этого значения дробятся строже
+  # и помечаются low_cohesion (0 — не дробить). Размер кластера не важен.
+  min_cohesion: 0.60
+  split_step: 0.03
+  max_split_rounds: 6
+
+scoring:
+  weights:
+    Q1_sharpness: 0.20 # резкость (Laplacian variance)
+    Q2_frontality: 0.20 # фронтальность (из 5 точек)
+    Q3_eye_open: 0.12 # открытость глаз
+    Q4_expression: 0.05 # нейтральность (геометрия рта)
+    Q5_face_size: 0.08 # размер лица
+    Q6_exposure: 0.07 # экспозиция / освещение
+    Q7_confidence: 0.03 # confidence детектора
+    Q8_centrality: 0.15 # «узнаваемость» = близость к центроиду серии (FaceRes)
+    Q9_nima: 0.10 # NIMA aesthetic значение: освещение/композиция кропа лица
+
+  hard_gates:
+    max_yaw_deg: 35.0 # максимальный поворот головы (жёсткий фильтр)
+    min_frontal_ratio: 0.45 # как в Face-ID Kiosk (0=профиль, 1=анфас)
+    min_ear: 0.58 # минимальный Q3 eye_open: открытые~0.65-0.85, прикрытые~0.42-0.58
+    min_sharpness_rel: 0.15 # кадр выбрасывается если sharpness < max_sharpness * rel
+
+output:
+  best_dir: "output/best"
+  rejected_dir: "output/rejected"
+  report_file: "output/report.json"
+  contact_sheet: "output/contact_sheet.html" # null — не генерировать

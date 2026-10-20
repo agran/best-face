@@ -1,0 +1,21 @@
+# Данные и результаты — не публиковать (персональные данные, в том числе дети)
+photos/
+output/
+output_*/
+debug_eyes/
+debug_*/
+best_face_output/
+contact_sheet*/
+
+# Модели и веса (скачиваются отдельно, см. README)
+models/
+
+# Python / окружения / кэши
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# ОС / редакторы
+.DS_Store
+Thumbs.db
