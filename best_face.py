@@ -478,6 +478,7 @@ def main():
         'total_photos':      len(all_photos),
         'threshold_cluster': cfg_cluster.get('threshold', 0.50),
         'clustering':        cfg_cluster,
+        'cluster_mode':      cluster_mode,
         'multi_face_policy': policy,
         'weights':           weights,
         'hard_gates':        hard_gates,

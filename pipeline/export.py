@@ -320,6 +320,7 @@ def build_contact_sheet(
 
     parts = [_HTML_HEAD]
     s = report.get('summary', {})
+    unit_label = 'Серия' if report.get('params', {}).get('cluster_mode') == 'series' else 'Персона'
     parts.append(
         f'<h1>Best-Face — результаты</h1>'
         f'<div class="summary">'
@@ -350,7 +351,7 @@ def build_contact_sheet(
             f'<div class="person" data-person="{cluster.person_id}" '
             f'data-doubt="{1 if doubt_reasons else 0}">'
             f'<div class="person-header">'
-            f'<span class="pid">Серия #{cluster.person_id}</span>'
+            f'<span class="pid">{unit_label} #{cluster.person_id}</span>'
             f'<span class="cnt">{len(cluster.frames)} кадров</span>'
             f'{badges}'
             f'</div>'
