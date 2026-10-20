@@ -9,6 +9,7 @@ pipeline/score.py — скоринг кадров и выбор лучшего �
   5. Выбрать кадр с максимальным score.
 """
 
+import os
 import numpy as np
 from typing import List, Dict, Optional
 from .cluster import FrameRecord, PersonCluster
@@ -33,6 +34,20 @@ _DEFAULT_GATES = {
     'min_ear':           0.58,
     'min_sharpness_rel': 0.15,
 }
+
+# Нормировка Q3 по человеку: если у человека в норме Q3 ниже _EYE_BASELINE_MIN
+# (узкий разрез глаз), его открытые глаза масштабируются к уровню _EYE_TARGET
+_EYE_BASELINE_MIN = 0.75
+_EYE_TARGET       = 0.90
+
+
+def mark_manual(scored: List[dict], file_name: str) -> bool:
+    """Пометить кадр с этим именем файла как выбранный вручную. Возвращает True, если найден."""
+    found = False
+    for r in scored:
+        r['manual'] = (os.path.basename(r['frame'].path) == file_name)
+        found = found or r['manual']
+    return found
 
 
 def _minmax(values: List[float]) -> List[float]:
@@ -89,12 +104,25 @@ def score_cluster(
 
     max_sharpness = max(q1_raw) if q1_raw else 1.0
 
+    # Q3 относительно самого человека: у людей с узким разрезом глаз открытый глаз
+    # даёт стабильно низкий Q3, и абсолютный порог принял бы их за «моргнувших».
+    # Базовый уровень — 75-й перцентиль Q3 по кадрам с надёжным EAR.
+    q3_scale = 1.0
+    ear_q3 = [f.metrics.get('Q3_eye_open', 1.0) for f in frames
+              if f.metrics.get('EAR_valid', 0.0) > 0.5]
+    if len(ear_q3) >= 3:
+        baseline = float(np.percentile(ear_q3, 75))
+        if 0.15 < baseline < _EYE_BASELINE_MIN:
+            q3_scale = _EYE_TARGET / baseline
+
     results = []
     for i, f in enumerate(frames):
         m = f.metrics.copy()
         m['Q1_sharpness'] = q1_norm[i]
         m['Q5_face_size']  = q5_norm[i]
         m['Q9_nima']       = q9_norm[i]
+        if q3_scale != 1.0 and m.get('EAR_valid', 0.0) > 0.5:
+            m['Q3_eye_open'] = min(1.0, m.get('Q3_eye_open', 1.0) * q3_scale)
 
         # ── 3. Жёсткие фильтры ───────────────────────────────────────────────
         rej = None
@@ -141,9 +169,12 @@ def score_cluster(
 
 
 def pick_best(scored: List[dict]) -> Optional[dict]:
-    """Вернуть лучший кадр из результатов score_cluster()."""
+    """Вернуть лучший кадр из результатов score_cluster(); ручной выбор имеет приоритет."""
     if not scored:
         return None
+    for r in scored:
+        if r.get('manual'):
+            return r
     # Предпочесть прошедший gates, иначе первый
     for r in scored:
         if r['passed_gates']:

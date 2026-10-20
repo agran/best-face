@@ -12,6 +12,7 @@ best_face.py — главный скрипт отбора лучших фото 
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -38,7 +39,7 @@ from pipeline.metrics import compute_all_metrics
 from pipeline.cluster import FrameRecord, cluster_frames
 from pipeline.cache   import FrameCache, make_signature, file_fingerprint
 from pipeline.exif    import read_shot_time
-from pipeline.score   import score_cluster, pick_best
+from pipeline.score   import score_cluster, pick_best, mark_manual
 from pipeline.export  import (
     copy_best_photos, build_report, save_report, build_contact_sheet
 )
@@ -213,6 +214,37 @@ def process_one(
     return rec
 
 
+def apply_manual_choices(path: str, scored_by_cluster: list) -> None:
+    """
+    Применить manual_choices.json ({"choices": {id: имя_файла}}).
+    Привязка идёт по имени файла, а не по номеру персоны, поэтому выбор остаётся
+    верным, даже если после смены настроек нумерация изменилась.
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        choices = json.load(f).get('choices', {})
+
+    file_to_cluster = {}
+    for ci, scored in enumerate(scored_by_cluster):
+        for r in scored:
+            file_to_cluster[os.path.basename(r['frame'].path)] = ci
+
+    chosen_per_cluster: dict = {}
+    missing = 0
+    for fname in choices.values():
+        ci = file_to_cluster.get(fname)
+        if ci is None:
+            missing += 1
+            continue
+        if ci in chosen_per_cluster and chosen_per_cluster[ci] != fname:
+            print(f'  [WARN] в одной группе выбрано несколько кадров, берём {fname}')
+        chosen_per_cluster[ci] = fname
+
+    for ci, fname in chosen_per_cluster.items():
+        mark_manual(scored_by_cluster[ci], fname)
+    print(f'  Ручных выборов применено: {len(chosen_per_cluster)}'
+          + (f' (не найдено в папке: {missing})' if missing else ''))
+
+
 # ─── Прогресс-бар ─────────────────────────────────────────────────────────────
 
 class _SimpleProgress:
@@ -252,6 +284,8 @@ def main():
                         help='Не генерировать HTML-контактный лист')
     parser.add_argument('--no-cache', action='store_true',
                         help='Не использовать кэш обработанных кадров (frame_cache.pkl)')
+    parser.add_argument('--choices', default=None, metavar='manual_choices.json',
+                        help='Применить ручной выбор лучших кадров, скачанный из контактного листа')
     args = parser.parse_args()
 
     # ── Конфиг ──────────────────────────────────────────────────────────────
@@ -427,6 +461,7 @@ def main():
         max_split_rounds = cfg_cluster.get('max_split_rounds',    6),
         mode             = cluster_mode,
         series_gap_sec   = cfg_cluster.get('series_gap_sec',      14.0),
+        dense_limit      = cfg_cluster.get('dense_limit',         6000),
     )
 
     n_with_time = sum(1 for r in all_records if r.shot_time is not None)
@@ -448,6 +483,10 @@ def main():
         score_cluster(c, weights=weights or None, gates=hard_gates or None)
         for c in clusters
     ]
+
+    # Ручной выбор из контактного листа: ищем кадр по имени файла среди всех кластеров
+    if args.choices:
+        apply_manual_choices(args.choices, scored_by_cluster)
 
     # Нумерация персон — в порядке исходной папки: по номеру файла лучшего кадра,
     # чтобы порядок person0001, person0002... в best/ совпадал с порядком съёмки
@@ -484,7 +523,8 @@ def main():
         'hard_gates':        hard_gates,
     }
 
-    report = build_report(clusters, scored_map, rejected_records, params)
+    report = build_report(clusters, scored_map, rejected_records, params,
+                          close_call_margin=cfg_scoring.get('close_call_margin', 0.02))
     save_report(report, report_file)
     print(f'  Отчёт: {report_file}')
 
@@ -513,6 +553,11 @@ def main():
     if s.get('close_call_persons'):
         print(f'  Серий с почти равными кадрами: {s["close_call_persons"]} '
               f'(в контактном листе фильтр «только сомнительные»)')
+    if s.get('single_frame_persons'):
+        print(f'  Персон с единственным кадром: {s["single_frame_persons"]} '
+              f'(выбирать не из чего — проверьте качество вручную)')
+    if s.get('manual_choices'):
+        print(f'  Выбрано вручную:        {s["manual_choices"]}')
     print(f'{"="*50}')
     print(f'  Результаты: {Path(best_dir).parent.resolve()}')
 

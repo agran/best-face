@@ -53,8 +53,13 @@ clustering:
   min_cohesion: 0.60
   split_step: 0.03
   max_split_rounds: 6
+  # Если кадров больше этого числа, режим person работает в два этапа (по временным
+  # сегментам, затем слияние центроидов): матрица сходства n×n не помещалась бы в память
+  dense_limit: 6000
 
 scoring:
+  # Серия помечается «почти равные кадры», если два лучших score отличаются меньше этого
+  close_call_margin: 0.02
   weights:
     Q1_sharpness: 0.20 # резкость (Laplacian variance)
     Q2_frontality: 0.20 # фронтальность (из 5 точек)

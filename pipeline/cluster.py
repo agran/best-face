@@ -226,6 +226,7 @@ def cluster_frames(
     max_split_rounds:   int   = 6,
     mode:               str   = 'person',
     series_gap_sec:     float = 14.0,
+    dense_limit:        int   = 6000,
 ) -> List[PersonCluster]:
     """
     Сгруппировать кадры в кластеры.
@@ -244,6 +245,9 @@ def cluster_frames(
                         'series': сначала разрез на серии по паузам в съёмке
                         (series_gap_sec), затем кластеризация по лицу внутри серии.
     series_gap_sec    — пауза между соседними кадрами, начинающая новую серию.
+    dense_limit       — в режиме 'person' при большем числе кадров работает двухэтапная
+                        схема (матрица n×n иначе не помещается в память): кластеризация
+                        внутри временных сегментов, затем слияние центроидов.
 
     Возвращает список PersonCluster, отсортированных по убыванию числа кадров.
     """
@@ -251,17 +255,23 @@ def cluster_frames(
     if not valid:
         return []
 
-    if mode == 'series':
+    identity_args = (threshold, time_window, threshold_time, time_window_sec,
+                     time_far_sec, time_far_penalty, min_cohesion, split_step,
+                     max_split_rounds)
+
+    two_stage = mode == 'person' and dense_limit > 0 and len(valid) > dense_limit
+    if mode == 'series' or two_stage:
         segments = [[valid[i] for i in seg] for seg in _segment_by_time(valid, series_gap_sec)]
+        if two_stage:
+            # Слишком длинный сегмент (или файлы без EXIF-времени) режем подряд идущими кусками
+            segments = [seg[k:k + dense_limit] for seg in segments
+                        for k in range(0, len(seg), dense_limit)]
     else:
         segments = [valid]
 
     clusters = []
     for seg in segments:
-        groups = _cluster_by_identity(
-            seg, threshold, time_window, threshold_time, time_window_sec,
-            time_far_sec, time_far_penalty, min_cohesion, split_step, max_split_rounds,
-        )
+        groups = _cluster_by_identity(seg, *identity_args)
         for group_frames, loose in groups:
             cluster = PersonCluster(0)
             cluster.frames = sorted(group_frames, key=lambda f: f.file_idx)
@@ -269,10 +279,35 @@ def cluster_frames(
             cluster.compute_centroids()
             clusters.append(cluster)
 
+    if two_stage:
+        clusters = _merge_clusters(clusters, threshold)
+
     clusters.sort(key=lambda c: len(c.frames), reverse=True)
     for new_id, cluster in enumerate(clusters, start=1):
         cluster.person_id = new_id
 
     return clusters
+
+
+def _merge_clusters(clusters: List[PersonCluster], threshold: float) -> List[PersonCluster]:
+    """Слить кластеры одного человека из разных сегментов (average-linkage по центроидам)."""
+    if len(clusters) < 2:
+        return clusters
+    C = np.stack([c.centroid_arc for c in clusters])
+    labels = _agglomerate(1.0 - C @ C.T, 1.0 - threshold)
+
+    merged = []
+    for lbl in sorted(set(labels.tolist())):
+        members = [clusters[i] for i in np.where(labels == lbl)[0]]
+        if len(members) == 1:
+            merged.append(members[0])
+            continue
+        cluster = PersonCluster(0)
+        cluster.frames = sorted((f for m in members for f in m.frames),
+                                key=lambda f: f.file_idx)
+        cluster.low_cohesion = any(m.low_cohesion for m in members)
+        cluster.compute_centroids()
+        merged.append(cluster)
+    return merged
 
 

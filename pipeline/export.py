@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 from .cluster import PersonCluster, FrameRecord
+from .score import pick_best
 
 
 # ─── Копирование файлов ────────────────────────────────────────────────────────
@@ -35,19 +36,17 @@ def copy_best_photos(
     Path(best_dir).mkdir(parents=True, exist_ok=True)
     Path(rejected_dir).mkdir(parents=True, exist_ok=True)
 
+    # Убрать результаты прошлого запуска: иначе в best/ останутся устаревшие personNNNN_*
+    for old in Path(best_dir).glob('person[0-9]*_*'):
+        if old.is_file():
+            try:
+                old.unlink()
+            except OSError as e:
+                print(f"  [WARN] Не удалось удалить устаревший {old.name}: {e}")
+
     for cluster in clusters:
         scored = scored_map.get(cluster.person_id, [])
-        if not scored:
-            continue
-
-        # Лучший кадр — первый после сортировки в score_cluster
-        best_result = None
-        for r in scored:
-            if r['passed_gates']:
-                best_result = r
-                break
-        if best_result is None and scored:
-            best_result = scored[0]  # все плохие
+        best_result = pick_best(scored)
 
         if best_result:
             src = best_result['frame'].path
@@ -85,12 +84,11 @@ def build_report(
         best_file = None
         best_score = 0.0
         all_passed = [r for r in scored if r['passed_gates']]
-        if all_passed:
-            best_file  = Path(all_passed[0]['frame'].path).name
-            best_score = all_passed[0]['score']
-        elif scored:
-            best_file  = Path(scored[0]['frame'].path).name
-            best_score = scored[0]['score']
+        best_result = pick_best(scored)
+        manual = bool(best_result and best_result.get('manual'))
+        if best_result:
+            best_file  = Path(best_result['frame'].path).name
+            best_score = best_result['score']
 
         frames_info = []
         for r in scored:
@@ -116,17 +114,20 @@ def build_report(
         for fi in frames_info:
             fi['selected'] = (fi['file'] == best_file)
 
-        all_low_quality = len(all_passed) == 0 and len(scored) > 0
+        all_low_quality = len(all_passed) == 0 and len(scored) > 0 and not manual
 
         # Два лучших кадра почти равны по score — выбор неуверенный, стоит глянуть руками
         pool = all_passed if all_passed else scored
-        close_call = len(pool) >= 2 and (pool[0]['score'] - pool[1]['score']) < close_call_margin
+        close_call = (not manual and len(pool) >= 2
+                      and (pool[0]['score'] - pool[1]['score']) < close_call_margin)
 
         persons.append({
             'person_id':       cluster.person_id,
             'frame_count':     len(cluster.frames),
+            'single_frame':    len(cluster.frames) == 1,
             'best_photo':      best_file,
             'best_score':      round(best_score, 4),
+            'manual_choice':   manual,
             'low_quality_flag': all_low_quality,
             'close_call':      close_call,
             'mean_similarity': round(cluster.mean_sim, 4) if cluster.mean_sim is not None else None,
@@ -147,6 +148,8 @@ def build_report(
             'low_quality_persons': sum(1 for p in persons if p['low_quality_flag']),
             'low_cohesion_persons': sum(1 for p in persons if p['low_cohesion']),
             'close_call_persons': sum(1 for p in persons if p['close_call']),
+            'single_frame_persons': sum(1 for p in persons if p['single_frame']),
+            'manual_choices': sum(1 for p in persons if p['manual_choice']),
         },
         'params':   params,
         'persons':  persons,
