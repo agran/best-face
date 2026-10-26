@@ -36,17 +36,33 @@ def q2_frontality(kps: np.ndarray) -> float:
     raise NotImplementedError("используй pipeline.align.estimate_frontal_ratio()")
 
 
+def eye_signals_score(ear: float, blink: float = None, squint: float = None) -> float:
+    """
+    Открытость глаз [0..1] из трёх независимых сигналов MediaPipe:
+      EAR    — геометрия век: min(1, EAR/0.30); EAR ≥ 0.30 = полностью открыт.
+      blink  — blendshape eyeBlink (1 = закрыт): 1 - blink/0.6.
+      squint — blendshape eyeSquint: прищур, полузакрытые глаза, «улыбка глазами».
+               Нормальный открытый глаз даёт ~0.15, прищур 0.35-0.5+.
+    Без blink/squint остаётся одна EAR-оценка.
+    """
+    ear_s = min(1.0, max(0.0, ear / 0.30))
+    if blink is None and squint is None:
+        return ear_s
+    parts, weights = [ear_s], [0.4]
+    if blink is not None:
+        parts.append(1.0 - min(1.0, max(0.0, blink) / 0.6)); weights.append(0.3)
+    if squint is not None:
+        parts.append(1.0 - min(1.0, max(0.0, squint - 0.15) / 0.5)); weights.append(0.3)
+    return float(np.dot(parts, weights) / sum(weights))
+
+
 def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None,
-                    blink: float = None) -> float:
+                    blink: float = None, squint: float = None) -> float:
     """
     Q3: Открытость глаз.
 
-    Если передан ear_value (из MediaPipe FaceLandmarker, EAR-метрика):
-        score = min(1.0, ear_value / 0.30)
-        EAR~0.28-0.33 = открытый, EAR~0.09-0.15 = закрытый/прищуренный
-        Порог min_ear=0.58 → требуется EAR >= 0.174
-    Если дополнительно передан blink (blendshapes eyeBlinkLeft/Right, 1 = закрыт),
-    итог — среднее EAR-оценки и (1 - blink): два независимых признака надёжнее одного.
+    Если передан ear_value (из MediaPipe FaceLandmarker) — см. eye_signals_score():
+    EAR вместе с blink/squint. Порог min_ear=0.58 откалиброван под эту шкалу.
 
     Иначе — fallback pixel-based (менее надёжен при прищуривании):
     A) pupil_score  — min пикселя в патче: open~10-15 → 0.75-0.83; closed~30-50 → 0.17-0.50.
@@ -57,10 +73,7 @@ def q3_eye_openness(face_crop: np.ndarray, kps_112=None, ear_value: float = None
        min(1, std / 35).  Вес: 0.25.
     """
     if ear_value is not None:
-        ear_score = min(1.0, max(0.0, ear_value / 0.30))
-        if blink is not None:
-            return 0.5 * ear_score + 0.5 * (1.0 - min(1.0, max(0.0, blink)))
-        return ear_score
+        return eye_signals_score(ear_value, blink, squint)
     h, w = face_crop.shape[:2]
     if h < 32 or w < 32:
         return 0.5
@@ -268,11 +281,12 @@ def compute_all_metrics(
     """
     pose_info = pose_info or {}
     sharp_crop = face_crop_224 if face_crop_224 is not None else face_crop_112
-    return {
+    metrics = {
         'Q1_sharpness':     q1_sharpness(sharp_crop),         # сырое
         'Q2_frontality':    float(frontal_ratio),             # [0,1]
         'Q3_eye_open':      q3_eye_openness(face_crop_112, None, ear_value,
-                                            pose_info.get('blink')),
+                                            pose_info.get('blink'),
+                                            pose_info.get('squint')),
         'Q4_expression':    q4_expression_neutrality(face_crop_112, kps_orig,
                                                      pose_info.get('jaw_open'),
                                                      pose_info.get('smile')),
@@ -283,3 +297,10 @@ def compute_all_metrics(
         'Q9_nima':          q9_face_illumination(face_crop_112),  # базовый; NIMA перезапишет
         'EAR_valid':        1.0 if ear_value is not None else 0.0,
     }
+    # Сырые сигналы глаз: score.py пересчитывает Q3 из них (формулу можно менять без
+    # повторной детекции)
+    for key, val in (('EAR_raw', ear_value), ('BLINK_raw', pose_info.get('blink')),
+                     ('SQUINT_raw', pose_info.get('squint'))):
+        if val is not None:
+            metrics[key] = float(val)
+    return metrics

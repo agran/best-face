@@ -75,6 +75,7 @@ def build_report(
     rejected_frames: List[FrameRecord],
     params: dict,
     close_call_margin: float = 0.02,
+    close_call_max_pool: int = 6,
 ) -> dict:
     """Построить структуру отчёта."""
     persons = []
@@ -116,9 +117,10 @@ def build_report(
 
         all_low_quality = len(all_passed) == 0 and len(scored) > 0 and not manual
 
-        # Два лучших кадра почти равны по score — выбор неуверенный, стоит глянуть руками
+        # Два лучших кадра почти равны по score при небольшом выборе — выбор неуверенный,
+        # стоит глянуть руками. Если хороших кадров много, любой из верхних подойдёт.
         pool = all_passed if all_passed else scored
-        close_call = (not manual and len(pool) >= 2
+        close_call = (not manual and 2 <= len(pool) <= close_call_max_pool
                       and (pool[0]['score'] - pool[1]['score']) < close_call_margin)
 
         persons.append({

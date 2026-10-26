@@ -3,9 +3,11 @@ pipeline/score.py — скоринг кадров и выбор лучшего �
 
 Порядок действий:
   1. Для каждого кластера вычислить Q8 (централность FaceRes-эмбеддинга).
-  2. Нормировать Q1 и Q5 по серии (min-max).
-  3. Применить жёсткие фильтры (hard gates) — отбросить явно непригодные кадры.
-  4. Взвешенная сумма Q1-Q8 → итоговый score.
+  2. Q1 — насыщающее отношение к эталону серии, Q5/Q9 — min-max по серии;
+     Q3 пересчитывается из сырых сигналов глаз (EAR + blink + squint).
+  3. Применить жёсткие фильтры (hard gates), включая «полузакрытые глаза» относительно
+     лучших кадров того же человека.
+  4. Взвешенная сумма Q1-Q9 → итоговый score.
   5. Выбрать кадр с максимальным score.
 """
 
@@ -13,15 +15,16 @@ import os
 import numpy as np
 from typing import List, Dict, Optional
 from .cluster import FrameRecord, PersonCluster
+from .metrics import eye_signals_score
 
 
 _DEFAULT_WEIGHTS = {
-    'Q1_sharpness':   0.20,
+    'Q1_sharpness':   0.17,
     'Q2_frontality':  0.20,
-    'Q3_eye_open':    0.12,
+    'Q3_eye_open':    0.18,
     'Q4_expression':  0.05,
-    'Q5_face_size':   0.08,
-    'Q6_exposure':    0.07,
+    'Q5_face_size':   0.06,
+    'Q6_exposure':    0.06,
     'Q7_confidence':  0.03,
     'Q8_centrality':  0.15,
     'Q9_nima':        0.10,
@@ -33,7 +36,11 @@ _DEFAULT_GATES = {
     'min_frontal_ratio': 0.45,
     'min_ear':           0.58,
     'min_sharpness_rel': 0.15,
+    'max_eye_gap':       0.08,
 }
+
+# Резкость ≥ этой доли от эталона серии (90-й перцентиль) считается одинаково хорошей
+_SHARP_SATURATION = 0.8
 
 # Нормировка Q3 по человеку: если у человека в норме Q3 ниже _EYE_BASELINE_MIN
 # (узкий разрез глаз), его открытые глаза масштабируются к уровню _EYE_TARGET
@@ -91,12 +98,19 @@ def score_cluster(
             q8 = 0.5  # нет данных → нейтрально
         f.metrics['Q8_centrality'] = q8
 
-    # ── 2. Нормировка Q1, Q5 и Q9 по серии (min-max) ─────────────────────
+    # ── 2. Нормировка Q1, Q5 и Q9 по серии ───────────────────────────────
     q1_raw = [f.metrics.get('Q1_sharpness', 0.0) for f in frames]
     q5_raw = [f.metrics.get('Q5_face_size', 0.0) for f in frames]
     q9_raw = [f.metrics.get('Q9_nima', 0.5)      for f in frames]
 
-    q1_norm = _minmax(q1_raw)
+    # Резкость — насыщающее отношение к «хорошему» уровню серии (90-й перцентиль), а не
+    # min-max: в большой серии min-max растягивал ничтожную разницу резкости на весь
+    # диапазон 0..1 и перебивал глаза и позу. Кадры с резкостью ≥ 80% от эталона равны.
+    sharp_ref = float(np.percentile(q1_raw, 90)) if q1_raw else 0.0
+    if sharp_ref > 1e-9:
+        q1_norm = [min(1.0, v / (_SHARP_SATURATION * sharp_ref)) for v in q1_raw]
+    else:
+        q1_norm = [1.0] * len(q1_raw)
     q5_norm = _minmax(q5_raw)
     # Q9 нормируем только если модель дала разные значения (иначе все 0.5 → minmax=1.0)
     q9_all_same = max(q9_raw) - min(q9_raw) < 0.01
@@ -104,16 +118,30 @@ def score_cluster(
 
     max_sharpness = max(q1_raw) if q1_raw else 1.0
 
+    # ── Q3: открытость глаз из сырых сигналов (EAR + blink + squint) ─────────
+    q3_vals = []
+    for f in frames:
+        mm = f.metrics
+        if 'EAR_raw' in mm:
+            q3_vals.append(eye_signals_score(mm['EAR_raw'], mm.get('BLINK_raw'),
+                                             mm.get('SQUINT_raw')))
+        else:
+            q3_vals.append(mm.get('Q3_eye_open', 1.0))
+    ear_ok = [f.metrics.get('EAR_valid', 0.0) > 0.5 for f in frames]
+
     # Q3 относительно самого человека: у людей с узким разрезом глаз открытый глаз
     # даёт стабильно низкий Q3, и абсолютный порог принял бы их за «моргнувших».
     # Базовый уровень — 75-й перцентиль Q3 по кадрам с надёжным EAR.
     q3_scale = 1.0
-    ear_q3 = [f.metrics.get('Q3_eye_open', 1.0) for f in frames
-              if f.metrics.get('EAR_valid', 0.0) > 0.5]
+    ear_q3 = [q for q, ok in zip(q3_vals, ear_ok) if ok]
     if len(ear_q3) >= 3:
         baseline = float(np.percentile(ear_q3, 75))
         if 0.15 < baseline < _EYE_BASELINE_MIN:
             q3_scale = _EYE_TARGET / baseline
+    q3_vals = [min(1.0, q * q3_scale) if ok else q for q, ok in zip(q3_vals, ear_ok)]
+
+    # Лучшие глаза этого человека: полузакрытые кадры сравниваются с ними
+    q3_ref = min(1.0, float(np.percentile(ear_q3, 90)) * q3_scale) if len(ear_q3) >= 2 else None
 
     results = []
     for i, f in enumerate(frames):
@@ -121,8 +149,7 @@ def score_cluster(
         m['Q1_sharpness'] = q1_norm[i]
         m['Q5_face_size']  = q5_norm[i]
         m['Q9_nima']       = q9_norm[i]
-        if q3_scale != 1.0 and m.get('EAR_valid', 0.0) > 0.5:
-            m['Q3_eye_open'] = min(1.0, m.get('Q3_eye_open', 1.0) * q3_scale)
+        m['Q3_eye_open']   = q3_vals[i]
 
         # ── 3. Жёсткие фильтры ───────────────────────────────────────────────
         rej = None
@@ -158,7 +185,20 @@ def score_cluster(
             'metrics_norm':   m,
             'passed_gates':   rej is None,
             'rejected_reason': rej,
+            'eye_gap':        (q3_ref - q3_vals[i]) if (q3_ref is not None and ear_ok[i]) else 0.0,
         })
+
+    # Мягкий фильтр «полузакрытые глаза»: кадр заметно прищурен относительно лучших
+    # кадров этого же человека, и при этом есть из чего выбрать. Если альтернатив
+    # нет (все остальные забракованы), кадр остаётся в игре.
+    eye_margin = gates.get('max_eye_gap', _DEFAULT_GATES['max_eye_gap'])
+    if eye_margin > 0:
+        has_alternative = any(r['passed_gates'] and r['eye_gap'] <= eye_margin for r in results)
+        if has_alternative:
+            for r in results:
+                if r['passed_gates'] and r['eye_gap'] > eye_margin:
+                    r['passed_gates'] = False
+                    r['rejected_reason'] = 'eyes_half_closed'
 
     # Сортировка: сначала прошедшие фильтры, затем по убыванию score
     results.sort(key=lambda r: (int(r['passed_gates']), r['score']), reverse=True)

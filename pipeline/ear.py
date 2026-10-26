@@ -96,6 +96,7 @@ class EarEstimator:
         Возвращает dict или None при ошибке:
           ear          — среднее EAR двух глаз (0≈closed, 0.30≈open)
           blink        — среднее eyeBlinkLeft/Right [0..1] (1 = глаз закрыт)
+          squint       — среднее eyeSquintLeft/Right [0..1] (прищур: полузакрытые глаза, улыбка)
           jaw_open     — jawOpen [0..1]
           smile        — среднее mouthSmileLeft/Right [0..1]
           yaw/pitch/roll — поворот головы в градусах (из матрицы трансформации)
@@ -130,13 +131,14 @@ class EarEstimator:
 
         out = {
             'ear': (_ear_from_6pts(pts[_RIGHT_EYE_IDX]) + _ear_from_6pts(pts[_LEFT_EYE_IDX])) / 2.0,
-            'blink': None, 'jaw_open': None, 'smile': None,
+            'blink': None, 'squint': None, 'jaw_open': None, 'smile': None,
             'yaw': None, 'pitch': None, 'roll': None,
         }
 
         if result.face_blendshapes:
             bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
             out['blink'] = (bs.get('eyeBlinkLeft', 0.0) + bs.get('eyeBlinkRight', 0.0)) / 2.0
+            out['squint'] = (bs.get('eyeSquintLeft', 0.0) + bs.get('eyeSquintRight', 0.0)) / 2.0
             out['jaw_open'] = bs.get('jawOpen', 0.0)
             out['smile'] = (bs.get('mouthSmileLeft', 0.0) + bs.get('mouthSmileRight', 0.0)) / 2.0
 

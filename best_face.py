@@ -524,7 +524,8 @@ def main():
     }
 
     report = build_report(clusters, scored_map, rejected_records, params,
-                          close_call_margin=cfg_scoring.get('close_call_margin', 0.02))
+                          close_call_margin=cfg_scoring.get('close_call_margin', 0.02),
+                          close_call_max_pool=cfg_scoring.get('close_call_max_pool', 6))
     save_report(report, report_file)
     print(f'  Отчёт: {report_file}')
 
