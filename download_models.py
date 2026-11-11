@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-download_models.py — скачать модели, необходимые для работы Best-Face, в папку models/.
+download_models.py — проверить модели в папке models/ и докачать недостающие.
 
-  python download_models.py            # скачать недостающие модели
+  python download_models.py            # проверить и скачать недостающие модели
   python download_models.py --force    # перекачать заново
 
-Скачиваются (из официальных открытых источников, проверяется SHA-256):
-  face_detection_yunet_2023mar.onnx  — детектор лиц (OpenCV Zoo)
-  w600k_mbf.onnx                     — ArcFace 512-dim (InsightFace, buffalo_s.zip;
-                                       из архива в 127 МБ скачивается только нужный файл)
-  face_landmarker.task               — MediaPipe FaceLandmarker (глаза, взгляд, поза)
+Основная задача — скачать `w600k_mbf.onnx` (ArcFace, InsightFace): эта модель не
+распространяется в репозитории, потому что разрешена только для некоммерческого
+исследовательского использования (см. THIRD_PARTY_LICENSES.md). Из архива buffalo_s.zip
+(127 МБ) скачивается только нужный файл.
 
-Не скачиваются (необязательны): nima_mobilenetv2.onnx (python export_nima.py)
-и human_faceres.onnx (нет готового файла, см. README).
+Остальные модели лежат в репозитории (models/); если файл удалён или повреждён, YuNet и
+MediaPipe докачиваются из официальных источников (проверяется SHA-256).
+NIMA и FaceRes — необязательные модели, у них нет внешнего источника: они берутся из репозитория.
 """
 
 import argparse
@@ -146,6 +146,9 @@ def ensure_model(name: str, force: bool = False, models_dir: Optional[Path] = No
         print(f'  {name}: контрольная сумма не совпала, скачиваю заново')
 
     print(f'  Скачиваю {name} ...')
+    if name == 'w600k_mbf.onnx':
+        print('  Внимание: эта модель (InsightFace) разрешена только для некоммерческого '
+              'исследовательского использования, см. THIRD_PARTY_LICENSES.md')
     tmp = dst.with_name(dst.name + '.part')
     try:
         if member:

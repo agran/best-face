@@ -8,8 +8,12 @@ best_face_output/
 *.pkl
 contact_sheet*/
 
-# Модели и веса (скачиваются отдельно, см. README)
-models/
+# Модели: в репозитории лежат лёгкие и свободно распространяемые (см. THIRD_PARTY_LICENSES.md).
+# w600k_mbf.onnx (InsightFace, только некоммерческое использование) НЕ распространяется —
+# скачивается при первом запуске. Исходные веса NIMA и временные файлы не нужны.
+models/w600k_mbf.onnx
+models/*.part
+models/nima_mobilenet_weights.h5
 
 # Python / окружения / кэши
 __pycache__/
