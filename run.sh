@@ -4,6 +4,8 @@
 # Без аргументов откроется диалог выбора папки (macOS/zenity/kdialog) или запрос в консоли.
 # При первом запуске создаётся окружение .venv и ставятся зависимости.
 set -u
+# Папка, из которой запустили: относительные пути к фото считаем от неё, а не от папки скрипта
+START_DIR="$PWD"
 cd "$(dirname "$0")" || exit 1
 export PYTHONIOENCODING=utf-8
 
@@ -15,20 +17,33 @@ pause() {
 }
 
 # ── Окружение ────────────────────────────────────────────────────────────────
+# Создаётся при первом запуске и обновляется, если изменился requirements.txt
 PY="$PWD/.venv/bin/python"
-if [ ! -f .venv/.deps_ok ]; then
-    BASE_PY="$(command -v python3 || command -v python || true)"
+if [ ! -x "$PY" ]; then
+    BASE_PY=""
+    for cand in python3 python; do
+        if command -v "$cand" >/dev/null 2>&1 \
+            && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+            BASE_PY="$cand"; break
+        fi
+    done
     if [ -z "$BASE_PY" ]; then
         echo "Python 3.10+ не найден. Установите его (macOS: brew install python; Linux: пакет python3 + python3-venv)."
         pause; exit 1
     fi
-    echo "Первый запуск: создаю окружение .venv и ставлю зависимости (несколько минут)..."
-    if ! "$BASE_PY" -m venv .venv || ! "$PY" -m pip install --upgrade pip \
-        || ! "$PY" -m pip install -r requirements.txt; then
+    echo "Первый запуск: создаю окружение .venv ..."
+    if ! "$BASE_PY" -m venv .venv; then
+        echo "Не удалось создать окружение (на Debian/Ubuntu нужен пакет python3-venv)."
+        pause; exit 1
+    fi
+fi
+if ! cmp -s requirements.txt .venv/requirements.installed; then
+    echo "Устанавливаю зависимости из requirements.txt (несколько минут, нужен интернет)..."
+    if ! "$PY" -m pip install --upgrade pip || ! "$PY" -m pip install -r requirements.txt; then
         echo "Не удалось установить зависимости."
         pause; exit 1
     fi
-    touch .venv/.deps_ok
+    cp requirements.txt .venv/requirements.installed
 fi
 
 # ── Папка с фото ─────────────────────────────────────────────────────────────
@@ -49,6 +64,10 @@ if [ -z "$SRC" ]; then
 fi
 
 SRC="${SRC/#\~/$HOME}"
+case "$SRC" in
+    /*) ;;
+    *) SRC="$START_DIR/$SRC" ;;
+esac
 if [ "${#SRC}" -gt 1 ]; then SRC="${SRC%/}"; fi
 
 if [ ! -d "$SRC" ]; then
@@ -71,6 +90,9 @@ if [ "$RC" -eq 0 ]; then
     fi
 else
     echo "Завершено с ошибкой, код $RC."
+    if [ "$RC" -eq 2 ]; then
+        echo "Скорее всего, не найдены файлы моделей: положите их в папку models/ (см. README.md)."
+    fi
 fi
 pause
 exit "$RC"
