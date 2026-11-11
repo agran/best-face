@@ -11,6 +11,58 @@ import cv2
 import numpy as np
 from typing import Tuple
 
+# Глаза при взгляде в камеру компенсируют поворот головы: смещение зрачка gaze_x
+# линейно зависит от yaw. Коэффициент подобран регрессией на реальных съёмках
+# (зрачок смещается на ~-0.0103 доли полуширины глаза на градус поворота).
+_GAZE_X_PER_YAW = -0.0103
+
+
+def gaze_deviation(gaze_x, yaw_deg, look_h, gaze_y_rel=None, look_v_rel=None) -> float:
+    """
+    Отклонение взгляда от камеры, 0 = смотрит в объектив, ≥1 = явно в сторону/вверх/вниз.
+      по горизонтали — смещение зрачка за вычетом компенсации поворота головы (радужка)
+                       и blendshapes eyeLookIn/Out сверх обычного уровня;
+      по вертикали   — смещение зрачка и eyeLookUp/Down относительно типичных для
+                       этого человека (gaze_y_rel, look_v_rel — уже с вычтенной медианой серии).
+    Возвращает None, если сигналов взгляда нет.
+    """
+    parts = []
+    if gaze_x is not None:
+        parts.append(abs(gaze_x - _GAZE_X_PER_YAW * (yaw_deg or 0.0)) / 0.11)
+    if look_h is not None:
+        parts.append(max(0.0, look_h - 0.30) / 0.40)
+    if gaze_y_rel is not None:
+        parts.append(abs(gaze_y_rel) / 0.13)
+    if look_v_rel is not None:
+        parts.append(max(0.0, look_v_rel - 0.25) / 0.40)
+    return max(parts) if parts else None
+
+
+def gaze_score(dev) -> float:
+    """[0..1]: 1 — взгляд в камеру. Небольшой шум (dev ≤ 0.3) не штрафуется."""
+    if dev is None:
+        return 0.5
+    return float(1.0 - min(1.0, max(0.0, (dev - 0.3) / 0.7)))
+
+
+def pose_score(yaw_deg, pitch_deg, roll_deg, frontal_ratio: float = 1.0) -> float:
+    """
+    [0..1]: насколько голова «ровно в камеру» — гладкий штраф за yaw, pitch и roll
+    (наклон головы) вместо жёстких порогов. 1 — идеально прямо.
+    Без pitch/roll (нет MediaPipe) — оценка по 5 точкам (frontal_ratio).
+    """
+    if pitch_deg is None or roll_deg is None:
+        return float(frontal_ratio)
+    dev2 = (yaw_deg / 8.0) ** 2 + (pitch_deg / 10.0) ** 2 + (roll_deg / 6.0) ** 2
+    return float(np.exp(-0.5 * dev2))
+
+
+def neutral_score(expr) -> float:
+    """[0..1]: серьёзное, нейтральное лицо → 1; улыбка, открытый рот, поднятые брови → ниже."""
+    if expr is None:
+        return 0.5
+    return float(1.0 - min(1.0, max(0.0, (expr - 0.15) / 1.0)))
+
 
 def q1_sharpness(face_crop: np.ndarray) -> float:
     """
@@ -300,7 +352,11 @@ def compute_all_metrics(
     # Сырые сигналы глаз: score.py пересчитывает Q3 из них (формулу можно менять без
     # повторной детекции)
     for key, val in (('EAR_raw', ear_value), ('BLINK_raw', pose_info.get('blink')),
-                     ('SQUINT_raw', pose_info.get('squint'))):
+                     ('SQUINT_raw', pose_info.get('squint')),
+                     ('GAZE_X_raw', pose_info.get('gaze_x')), ('GAZE_Y_raw', pose_info.get('gaze_y')),
+                     ('LOOK_H_raw', pose_info.get('look_h')), ('LOOK_V_raw', pose_info.get('look_v')),
+                     ('EXPR_raw', pose_info.get('expr')), ('JAW_raw', pose_info.get('jaw_open')),
+                     ('SMILE_raw', pose_info.get('smile'))):
         if val is not None:
             metrics[key] = float(val)
     return metrics

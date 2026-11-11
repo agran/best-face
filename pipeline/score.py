@@ -15,28 +15,36 @@ import os
 import numpy as np
 from typing import List, Dict, Optional
 from .cluster import FrameRecord, PersonCluster
-from .metrics import eye_signals_score
+from .metrics import eye_signals_score, gaze_deviation, gaze_score, pose_score, neutral_score
 
 
 _DEFAULT_WEIGHTS = {
-    'Q1_sharpness':   0.17,
-    'Q2_frontality':  0.20,
-    'Q3_eye_open':    0.18,
-    'Q4_expression':  0.05,
-    'Q5_face_size':   0.06,
-    'Q6_exposure':    0.06,
-    'Q7_confidence':  0.03,
-    'Q8_centrality':  0.15,
-    'Q9_nima':        0.10,
+    'Q1_sharpness':   0.12,
+    'Q2_frontality':  0.08,
+    'Q3_eye_open':    0.15,
+    'Q4_expression':  0.17,   # нейтральность: серьёзное лицо без улыбки и открытого рта
+    'Q5_face_size':   0.04,
+    'Q6_exposure':    0.04,
+    'Q7_confidence':  0.02,
+    'Q8_centrality':  0.10,
+    'Q9_nima':        0.06,
+    'Q10_gaze':       0.12,   # взгляд в камеру
+    'Q11_pose':       0.10,   # голова ровно: yaw + pitch + roll
 }
 
 _DEFAULT_GATES = {
-    'max_yaw_deg':       35.0,
-    'max_pitch_deg':     30.0,
+    'max_yaw_deg':       25.0,
+    'max_pitch_deg':     20.0,
+    'max_roll_deg':      15.0,
     'min_frontal_ratio': 0.45,
     'min_ear':           0.58,
     'min_sharpness_rel': 0.15,
+    'max_jaw_open':      0.10,
+    # Относительные фильтры: кадр выбывает, если хуже лучших кадров этого же человека
+    # больше чем на указанную величину (при наличии альтернатив); 0 — выключено
     'max_eye_gap':       0.08,
+    'max_gaze_gap':      0.25,
+    'max_expr_gap':      0.15,
 }
 
 # Резкость ≥ этой доли от эталона серии (90-й перцентиль) считается одинаково хорошей
@@ -143,6 +151,37 @@ def score_cluster(
     # Лучшие глаза этого человека: полузакрытые кадры сравниваются с ними
     q3_ref = min(1.0, float(np.percentile(ear_q3, 90)) * q3_scale) if len(ear_q3) >= 2 else None
 
+    # ── Взгляд, поза и выражение (Q4, Q10, Q11) ──────────────────────────────
+    # Вертикальные сигналы взгляда сравниваются с типичными для этого человека:
+    # у очков и разных разрезов глаз базовое положение зрачка разное.
+    gys = [f.metrics['GAZE_Y_raw'] for f in frames if 'GAZE_Y_raw' in f.metrics]
+    lvs = [f.metrics['LOOK_V_raw'] for f in frames if 'LOOK_V_raw' in f.metrics]
+    gy_med = float(np.median(gys)) if len(gys) >= 3 else None
+    lv_med = float(np.median(lvs)) if len(lvs) >= 3 else None
+
+    q4_vals, q10_vals, q11_vals = [], [], []
+    for f in frames:
+        mm = f.metrics
+        q4_vals.append(neutral_score(mm['EXPR_raw']) if 'EXPR_raw' in mm
+                       else mm.get('Q4_expression', 1.0))
+        dev = gaze_deviation(
+            mm.get('GAZE_X_raw'), f.yaw_deg, mm.get('LOOK_H_raw'),
+            (mm['GAZE_Y_raw'] - gy_med) if (gy_med is not None and 'GAZE_Y_raw' in mm) else None,
+            (mm['LOOK_V_raw'] - lv_med) if (lv_med is not None and 'LOOK_V_raw' in mm) else None,
+        )
+        q10_vals.append(gaze_score(dev))
+        q11_vals.append(pose_score(f.yaw_deg, f.pitch_deg, f.roll_deg, f.frontal_ratio))
+
+    def _ref(vals, present):
+        """Эталон серии — 90-й перцентиль по кадрам, у которых сигнал есть."""
+        v = [x for x, ok in zip(vals, present) if ok]
+        return float(np.percentile(v, 90)) if len(v) >= 2 else None
+
+    has_expr = ['EXPR_raw' in f.metrics for f in frames]
+    has_gaze = ['GAZE_X_raw' in f.metrics for f in frames]
+    q4_ref = _ref(q4_vals, has_expr)
+    q10_ref = _ref(q10_vals, has_gaze)
+
     results = []
     for i, f in enumerate(frames):
         m = f.metrics.copy()
@@ -150,15 +189,25 @@ def score_cluster(
         m['Q5_face_size']  = q5_norm[i]
         m['Q9_nima']       = q9_norm[i]
         m['Q3_eye_open']   = q3_vals[i]
+        m['Q4_expression'] = q4_vals[i]
+        m['Q10_gaze']      = q10_vals[i]
+        m['Q11_pose']      = q11_vals[i]
 
         # ── 3. Жёсткие фильтры ───────────────────────────────────────────────
         rej = None
 
-        if abs(f.yaw_deg) > gates.get('max_yaw_deg', 35.0):
+        if abs(f.yaw_deg) > gates.get('max_yaw_deg', 25.0):
             rej = 'yaw_too_large'
 
-        if f.pitch_deg is not None and abs(f.pitch_deg) > gates.get('max_pitch_deg', 30.0):
+        if f.pitch_deg is not None and abs(f.pitch_deg) > gates.get('max_pitch_deg', 20.0):
             rej = rej or 'pitch_too_large'
+
+        if f.roll_deg is not None and abs(f.roll_deg) > gates.get('max_roll_deg', 15.0):
+            rej = rej or 'head_tilted'
+
+        jaw = f.metrics.get('JAW_raw')
+        if jaw is not None and jaw > gates.get('max_jaw_open', 0.10):
+            rej = rej or 'mouth_open'
 
         if f.frontal_ratio < gates.get('min_frontal_ratio', 0.45):
             rej = rej or 'not_frontal'
@@ -185,20 +234,27 @@ def score_cluster(
             'metrics_norm':   m,
             'passed_gates':   rej is None,
             'rejected_reason': rej,
-            'eye_gap':        (q3_ref - q3_vals[i]) if (q3_ref is not None and ear_ok[i]) else 0.0,
+            'gaps': {
+                'eyes_half_closed': (q3_ref - q3_vals[i]) if (q3_ref is not None and ear_ok[i]) else 0.0,
+                'gaze_off':         (q10_ref - q10_vals[i]) if (q10_ref is not None and has_gaze[i]) else 0.0,
+                'not_neutral':      (q4_ref - q4_vals[i]) if (q4_ref is not None and has_expr[i]) else 0.0,
+            },
         })
 
-    # Мягкий фильтр «полузакрытые глаза»: кадр заметно прищурен относительно лучших
-    # кадров этого же человека, и при этом есть из чего выбрать. Если альтернатив
-    # нет (все остальные забракованы), кадр остаётся в игре.
-    eye_margin = gates.get('max_eye_gap', _DEFAULT_GATES['max_eye_gap'])
-    if eye_margin > 0:
-        has_alternative = any(r['passed_gates'] and r['eye_gap'] <= eye_margin for r in results)
-        if has_alternative:
+    # Относительные фильтры: кадр заметно хуже лучших кадров этого же человека (глаза
+    # прищурены, взгляд в сторону, улыбка/мимика), и при этом есть из чего выбрать.
+    # Если альтернатив нет (все остальные забракованы), кадр остаётся в игре.
+    for reason, gate_key in (('eyes_half_closed', 'max_eye_gap'),
+                             ('gaze_off', 'max_gaze_gap'),
+                             ('not_neutral', 'max_expr_gap')):
+        margin = gates.get(gate_key, _DEFAULT_GATES[gate_key])
+        if margin <= 0:
+            continue
+        if any(r['passed_gates'] and r['gaps'][reason] <= margin for r in results):
             for r in results:
-                if r['passed_gates'] and r['eye_gap'] > eye_margin:
+                if r['passed_gates'] and r['gaps'][reason] > margin:
                     r['passed_gates'] = False
-                    r['rejected_reason'] = 'eyes_half_closed'
+                    r['rejected_reason'] = reason
 
     # Сортировка: сначала прошедшие фильтры, затем по убыванию score
     results.sort(key=lambda r: (int(r['passed_gates']), r['score']), reverse=True)

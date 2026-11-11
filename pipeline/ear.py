@@ -25,6 +25,9 @@ import numpy as np
 _RIGHT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 # — левый глаз
 _LEFT_EYE_IDX  = [362, 385, 387, 263, 373, 380]
+# Центры радужек (face mesh с iris): 468 — для глаза 33/133, 473 — для глаза 362/263
+_IRIS_RIGHT = 468
+_IRIS_LEFT  = 473
 
 # Нормировка EAR → [0, 1]
 _EAR_SCALE = 0.30          # EAR полностью открытого глаза ≈ 0.28–0.33
@@ -100,6 +103,9 @@ class EarEstimator:
           jaw_open     — jawOpen [0..1]
           smile        — среднее mouthSmileLeft/Right [0..1]
           yaw/pitch/roll — поворот головы в градусах (из матрицы трансформации)
+          gaze_x/gaze_y  — смещение зрачка от центра глаза в долях полуширины глаза (по радужке)
+          look_h/look_v  — отклонение взгляда по blendshapes eyeLook* [0..1]
+          expr           — суммарная «ненейтральность» выражения (0 = серьёзное лицо)
         """
         if not self._available:
             return None
@@ -133,14 +139,51 @@ class EarEstimator:
             'ear': (_ear_from_6pts(pts[_RIGHT_EYE_IDX]) + _ear_from_6pts(pts[_LEFT_EYE_IDX])) / 2.0,
             'blink': None, 'squint': None, 'jaw_open': None, 'smile': None,
             'yaw': None, 'pitch': None, 'roll': None,
+            'gaze_x': None, 'gaze_y': None, 'look_h': None, 'look_v': None, 'expr': None,
         }
+
+        # Взгляд по радужке (ландмарки 468-477): смещение центра зрачка от центра глаза
+        # в долях полуширины глаза. 0 — зрачок по центру (взгляд прямо относительно головы).
+        if len(pts) >= 478:
+            gx, gy = [], []
+            for iris, c_out, c_in in ((_IRIS_RIGHT, 33, 133), (_IRIS_LEFT, 362, 263)):
+                a, b = pts[c_out], pts[c_in]
+                half = max(float(np.linalg.norm(a - b)) / 2.0, 1e-6)
+                mid = (a + b) / 2.0
+                gx.append(float((pts[iris][0] - mid[0]) / half))
+                gy.append(float((pts[iris][1] - mid[1]) / half))
+            # смещения в системе изображения: знак у двух глаз общий, поэтому усредняем
+            out['gaze_x'], out['gaze_y'] = float(np.mean(gx)), float(np.mean(gy))
 
         if result.face_blendshapes:
             bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
-            out['blink'] = (bs.get('eyeBlinkLeft', 0.0) + bs.get('eyeBlinkRight', 0.0)) / 2.0
-            out['squint'] = (bs.get('eyeSquintLeft', 0.0) + bs.get('eyeSquintRight', 0.0)) / 2.0
+
+            def pair(name):
+                return (bs.get(name + 'Left', 0.0) + bs.get(name + 'Right', 0.0)) / 2.0
+
+            out['blink'] = pair('eyeBlink')
+            out['squint'] = pair('eyeSquint')
             out['jaw_open'] = bs.get('jawOpen', 0.0)
-            out['smile'] = (bs.get('mouthSmileLeft', 0.0) + bs.get('mouthSmileRight', 0.0)) / 2.0
+            out['smile'] = pair('mouthSmile')
+            # Взгляд по blendshapes: отклонение в стороны (in/out) и вверх/вниз
+            out['look_h'] = max(abs(bs.get('eyeLookInLeft', 0.0) - bs.get('eyeLookOutLeft', 0.0)),
+                                abs(bs.get('eyeLookInRight', 0.0) - bs.get('eyeLookOutRight', 0.0)))
+            out['look_v'] = max(abs(bs.get('eyeLookUpLeft', 0.0) - bs.get('eyeLookDownLeft', 0.0)),
+                                abs(bs.get('eyeLookUpRight', 0.0) - bs.get('eyeLookDownRight', 0.0)))
+            # «Ненейтральность» выражения: улыбка, открытый рот, растянутые губы, губы
+            # трубочкой, поднятые брови, хмурость. Серьёзное лицо → близко к 0.
+            out['expr'] = float(
+                1.0 * out['smile']
+                + 0.5 * pair('mouthDimple')
+                + 1.0 * out['jaw_open']
+                + 0.7 * pair('mouthStretch')
+                + 0.7 * bs.get('mouthPucker', 0.0)
+                + 0.5 * bs.get('mouthFunnel', 0.0)
+                + 0.8 * max(bs.get('browInnerUp', 0.0), pair('browOuterUp'))
+                + 0.5 * pair('cheekSquint')
+                + 0.5 * pair('mouthFrown')
+                + 0.3 * pair('mouthUpperUp')
+            )
 
         if result.facial_transformation_matrixes:
             R = np.asarray(result.facial_transformation_matrixes[0], dtype=np.float64)[:3, :3]

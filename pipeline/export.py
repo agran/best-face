@@ -106,6 +106,7 @@ def build_report(
                 'yaw_deg':         round(f.yaw_deg, 1),
                 'frontal_ratio':   round(f.frontal_ratio, 3),
                 'pitch_deg':       round(f.pitch_deg, 1) if f.pitch_deg is not None else None,
+                'roll_deg':        round(f.roll_deg, 1) if f.roll_deg is not None else None,
                 'det_conf':        round(f.det_conf, 3),
                 'gender':          _gender_str(f.gender),
                 'age':             round(f.age, 1) if f.age is not None else None,
