@@ -171,7 +171,7 @@ class EarEstimator:
             out['look_v'] = max(abs(bs.get('eyeLookUpLeft', 0.0) - bs.get('eyeLookDownLeft', 0.0)),
                                 abs(bs.get('eyeLookUpRight', 0.0) - bs.get('eyeLookDownRight', 0.0)))
             # «Ненейтральность» выражения: улыбка, открытый рот, растянутые губы, губы
-            # трубочкой, поднятые брови, хмурость. Серьёзное лицо → близко к 0.
+            # трубочкой, нахмуренные (browDown) или поднятые брови. Серьёзное лицо → близко к 0.
             out['expr'] = float(
                 1.0 * out['smile']
                 + 0.5 * pair('mouthDimple')
@@ -179,7 +179,8 @@ class EarEstimator:
                 + 0.7 * pair('mouthStretch')
                 + 1.0 * bs.get('mouthPucker', 0.0)
                 + 0.7 * bs.get('mouthFunnel', 0.0)
-                + 0.8 * max(bs.get('browInnerUp', 0.0), pair('browOuterUp'))
+                + 0.4 * max(bs.get('browInnerUp', 0.0), pair('browOuterUp'))
+                + 2.0 * pair('browDown')   # нахмуренные брови заметно хуже слегка поднятых
                 + 0.5 * pair('cheekSquint')
                 + 0.5 * pair('mouthFrown')
                 + 0.3 * pair('mouthUpperUp')

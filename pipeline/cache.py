@@ -16,7 +16,7 @@ from typing import Optional
 
 from .cluster import FrameRecord
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 
 def make_signature(**parts) -> str:
