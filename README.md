@@ -125,6 +125,12 @@ pip install pytest
 python -m pytest tests
 ```
 
+## Лицензия
+
+Код проекта распространяется по лицензии [MIT](LICENSE). Это не относится к моделям: у каждой своя лицензия,
+а `w600k_mbf.onnx` (InsightFace) разрешена только для некоммерческого исследовательского использования.
+Подробности — в [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
 ## Подробнее
 
 Исходное проектное описание — в [ОПИСАНИЕ_ПРОЕКТА.md](ОПИСАНИЕ_ПРОЕКТА.md). Сторонние модели и их лицензии — в [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
