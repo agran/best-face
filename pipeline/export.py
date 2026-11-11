@@ -11,6 +11,7 @@ pipeline/export.py — сохранение результатов.
 import os
 import json
 import shutil
+import time
 import html as html_mod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,6 +26,30 @@ from .score import pick_best
 
 # ─── Копирование файлов ────────────────────────────────────────────────────────
 
+_KEEP_BACKUPS = 3
+
+
+def _archive_previous_best(best_dir: Path) -> None:
+    """Перенести personNNNN_* из best/ в best_prev/<время>, оставив не более _KEEP_BACKUPS копий."""
+    old_files = [p for p in best_dir.glob('person[0-9]*_*') if p.is_file()]
+    if not old_files:
+        return
+    prev_root = best_dir.parent / (best_dir.name + '_prev')
+    dest = prev_root / time.strftime('%Y%m%d_%H%M%S')
+    dest.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for p in old_files:
+        try:
+            shutil.move(str(p), str(dest / p.name))
+            moved += 1
+        except OSError as e:
+            print(f"  [WARN] Не удалось сохранить прежний {p.name}: {e}")
+    print(f"  Прежние файлы best/ ({moved}) перенесены в {dest}")
+    backups = sorted(d for d in prev_root.iterdir() if d.is_dir())
+    for d in backups[:-_KEEP_BACKUPS]:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def copy_best_photos(
     clusters: List[PersonCluster],
     scored_map: dict,   # person_id → List[score_dict]
@@ -32,17 +57,18 @@ def copy_best_photos(
     rejected_dir: str,
     rejected_frames: List[FrameRecord],
 ) -> None:
-    """Скопировать лучшие фото в best_dir, бракованные в rejected_dir."""
+    """
+    Скопировать лучшие фото в best_dir, бракованные в rejected_dir.
+
+    Прежние файлы personNNNN_* из best_dir НЕ удаляются, а переносятся в папку
+    best_prev/<время> рядом с best/ (хранятся последние 3 копии): пользователь мог
+    переименовать или дополнить их имена вручную, и повторный запуск не должен
+    уничтожать эту работу.
+    """
     Path(best_dir).mkdir(parents=True, exist_ok=True)
     Path(rejected_dir).mkdir(parents=True, exist_ok=True)
 
-    # Убрать результаты прошлого запуска: иначе в best/ останутся устаревшие personNNNN_*
-    for old in Path(best_dir).glob('person[0-9]*_*'):
-        if old.is_file():
-            try:
-                old.unlink()
-            except OSError as e:
-                print(f"  [WARN] Не удалось удалить устаревший {old.name}: {e}")
+    _archive_previous_best(Path(best_dir))
 
     for cluster in clusters:
         scored = scored_map.get(cluster.person_id, [])

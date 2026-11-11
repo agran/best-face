@@ -6,6 +6,7 @@ debug_eyes/
 debug_*/
 best_face_output/
 *.pkl
+*.npz
 contact_sheet*/
 
 # Модели: в репозитории лежат лёгкие и свободно распространяемые (см. THIRD_PARTY_LICENSES.md).

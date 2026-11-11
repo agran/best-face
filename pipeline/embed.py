@@ -1,4 +1,4 @@
-﻿"""
+"""
 pipeline/embed.py — извлечение эмбеддингов лиц через ONNX Runtime.
 
 Две модели:
@@ -217,8 +217,11 @@ class NimaScorer:
         self._sess = _make_session(model_path)
         self._input_name  = self._sess.get_inputs()[0].name
         self._output_name = self._sess.get_outputs()[0].name
+        # Keras-конвертация даёт NHWC [N,224,224,3], PyTorch-экспорт — NCHW [N,3,224,224]
+        in_shape = self._sess.get_inputs()[0].shape
+        self._nchw = len(in_shape) == 4 and in_shape[1] == 3
         used = self._sess.get_providers()[0]
-        print(f'  NimaScorer:       {used}')
+        print(f'  NimaScorer:       {used} ({"NCHW" if self._nchw else "NHWC"})')
 
     @property
     def available(self) -> bool:
@@ -234,7 +237,7 @@ class NimaScorer:
         try:
             rgb = cv2.cvtColor(face_bgr_224, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             rgb = (rgb - self._MEAN) / self._STD          # ImageNet normalization
-            tensor = rgb[np.newaxis]                       # [1, 224, 224, 3] NHWC (Keras)
+            tensor = (rgb.transpose(2, 0, 1) if self._nchw else rgb)[np.newaxis]
             probs = self._sess.run(
                 [self._output_name], {self._input_name: tensor}
             )[0][0]                                       # (10,) softmax

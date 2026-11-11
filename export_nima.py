@@ -210,33 +210,6 @@ def verify_onnx():
     return inp.shape
 
 
-# ─── Патч NimaScorer в embed.py под NHWC (Keras-формат) ───────────────────────
-
-def patch_embed_for_nhwc():
-    """
-    Keras-модель ожидает NHWC [N, 224, 224, 3].
-    Исходный NimaScorer написан под NCHW [N, 3, 224, 224] (PyTorch-стиль).
-    Патчим embed.py: убираем transpose, формат остаётся HWC.
-    """
-    embed_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pipeline', 'embed.py')
-    with open(embed_path, 'r', encoding='utf-8') as f:
-        src = f.read()
-
-    nchw_line = "rgb.transpose(2, 0, 1)[np.newaxis]  # [1, 3, 224, 224]"
-    nhwc_line = "rgb[np.newaxis]                       # [1, 224, 224, 3] NHWC (Keras)"
-
-    if nchw_line in src:
-        src = src.replace(nchw_line, nhwc_line)
-        with open(embed_path, 'w', encoding='utf-8') as f:
-            f.write(src)
-        print('  embed.py обновлён: NimaScorer теперь использует NHWC.')
-    elif nhwc_line in src:
-        print('  embed.py уже в NHWC-режиме.')
-    else:
-        print('  ВНИМАНИЕ: не удалось автоматически патчить embed.py.')
-        print('  Проверьте NimaScorer.__call__ вручную — нужно убрать transpose.')
-
-
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -262,7 +235,6 @@ def main():
         sys.exit(1)
 
     verify_onnx()
-    patch_embed_for_nhwc()
 
     print()
     print('=' * 50)

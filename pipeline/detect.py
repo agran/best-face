@@ -39,12 +39,15 @@ class FaceDetector:
         self._cur_size   = (0, 0)
 
     def _ensure_detector(self, w: int, h: int):
-        if self._detector is None or self._cur_size != (w, h):
+        if self._detector is None:
             self._detector = cv2.FaceDetectorYN.create(
                 self._model_path, '', (w, h),
                 self._conf, self._nms, top_k=1000
             )
-            self._cur_size = (w, h)
+        elif self._cur_size != (w, h):
+            # дешевле, чем пересоздавать сеть при смене размера (портрет/ландшафт)
+            self._detector.setInputSize((w, h))
+        self._cur_size = (w, h)
 
     def detect(self, img_bgr: np.ndarray,
                min_face_px: int = 50) -> List[FaceDetectionResult]:

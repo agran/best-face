@@ -195,6 +195,10 @@ def process_one(
 
     # ArcFace эмбеддинг (512-dim, для группировки)
     rec.emb_arc = embedder_arc(crop_112)
+    if rec.emb_arc is None:
+        # без эмбеддинга кадр не попал бы ни в один кластер и молча пропал бы из результата
+        rec.rejected_reason = 'embedding_failed'
+        return rec
 
     # FaceRes эмбеддинг (1024-dim, целевая метрика); без модели Q8 считается по ArcFace
     if embedder_res is not None:
@@ -344,7 +348,7 @@ def main():
     parser.add_argument('--no-contact-sheet', action='store_true',
                         help='Не генерировать HTML-контактный лист')
     parser.add_argument('--no-cache', action='store_true',
-                        help='Не использовать кэш обработанных кадров (frame_cache.pkl)')
+                        help='Не использовать кэш обработанных кадров (frame_cache.npz)')
     parser.add_argument('--no-download', action='store_true',
                         help='Не скачивать недостающие модели автоматически')
     parser.add_argument('--choices', default=None, metavar='manual_choices.json',
@@ -396,6 +400,9 @@ def main():
     cfg_models  = cfg.get('models',     {})
 
     # ── Сканирование ────────────────────────────────────────────────────────
+    if not os.path.isdir(args.input_dir):
+        print(f'ОШИБКА: папка с фото не найдена: {args.input_dir}')
+        sys.exit(1)
     print(f'Сканируем: {args.input_dir}')
     all_photos = scan_photos(args.input_dir)
     if args.limit > 0:
@@ -447,7 +454,7 @@ def main():
         models=[file_fingerprint(p) for p in (det_path, arc_path, faceres_path, nima_path, ear_path)],
         detection=cfg_det, policy=policy,
     )
-    cache = FrameCache(os.path.join(base, 'frame_cache.pkl'), cache_sig,
+    cache = FrameCache(os.path.join(base, 'frame_cache.npz'), cache_sig,
                        enabled=not args.no_cache)
 
     results: dict = {}
