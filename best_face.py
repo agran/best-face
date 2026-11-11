@@ -40,6 +40,7 @@ from pipeline.cluster import FrameRecord, cluster_frames
 from pipeline.cache   import FrameCache, make_signature, file_fingerprint
 from pipeline.exif    import read_shot_time
 from pipeline.score   import score_cluster, pick_best, mark_manual
+from download_models import MODELS, ensure_model
 from pipeline.export  import (
     copy_best_photos, build_report, save_report, build_contact_sheet
 )
@@ -55,22 +56,40 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+_AUTO_DOWNLOAD = True   # отключается ключом --no-download
+
+
 def resolve_model_path(path, label: str, required: bool = True):
     """
-    Проверить путь к модели. Если файла нет (например, недоступен сетевой диск),
-    искать одноимённый файл в локальной папке models/.
+    Найти файл модели. Порядок: путь из конфига (относительные пути — от папки программы),
+    затем одноимённый файл в models/. Если файла нет и модель известна
+    (см. download_models.py), она скачивается автоматически, папка models/ создаётся.
     """
     if not path:
         return path
-    if os.path.exists(path):
-        return path
-    local = Path(__file__).parent / 'models' / Path(str(path).replace('\\', '/')).name
+    app_dir = Path(__file__).resolve().parent
+    models_dir = app_dir / 'models'
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    p = Path(str(path).replace('\\', '/')) if not os.path.isabs(str(path)) else Path(path)
+    for cand in ((app_dir / p) if not p.is_absolute() else p, Path(path)):
+        if cand.exists():
+            return str(cand)
+
+    local = models_dir / Path(str(path).replace('\\', '/')).name
     if local.exists():
         print(f'  [WARN] {label}: {path} недоступен, использую {local}')
         return str(local)
+
+    if _AUTO_DOWNLOAD and local.name in MODELS:
+        print(f'  Модель {label} ({local.name}) не найдена — скачиваю в {models_dir}')
+        if ensure_model(local.name, models_dir=models_dir):
+            return str(local)
+
     if required:
         print(f'ОШИБКА: модель {label} не найдена: {path}\n'
-              f'  Скопируйте её в {local.parent} или поправьте путь в config.yaml.')
+              f'  Выполните: python download_models.py\n'
+              f'  либо скопируйте файл в {models_dir} или поправьте путь в config.yaml.')
         sys.exit(2)
     print(f'  [WARN] {label}: {path} не найден — компонент отключён')
     return None
@@ -284,9 +303,13 @@ def main():
                         help='Не генерировать HTML-контактный лист')
     parser.add_argument('--no-cache', action='store_true',
                         help='Не использовать кэш обработанных кадров (frame_cache.pkl)')
+    parser.add_argument('--no-download', action='store_true',
+                        help='Не скачивать недостающие модели автоматически')
     parser.add_argument('--choices', default=None, metavar='manual_choices.json',
                         help='Применить ручной выбор лучших кадров, скачанный из контактного листа')
     args = parser.parse_args()
+    global _AUTO_DOWNLOAD
+    _AUTO_DOWNLOAD = not args.no_download
 
     # ── Конфиг ──────────────────────────────────────────────────────────────
     cfg = load_config(args.config)

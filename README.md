@@ -2,8 +2,28 @@
 
 Автоматический отбор лучшего фото из серий. На вход — папка с фотографиями
 (несколько кадров каждого человека вперемешку), на выход — по одному лучшему кадру
-на человека: самому резкому, фронтальному, с открытыми глазами и наиболее
-«узнаваемому» для систем распознавания лиц.
+на человека: серьёзное лицо, смотрящее ровно в камеру, с открытыми глазами, резкое
+и наиболее «узнаваемое» для систем распознавания лиц.
+
+## Быстрый старт (без git и командной строки)
+
+1. **Скачайте программу.** На странице репозитория нажмите зелёную кнопку **Code → Download ZIP**
+   и распакуйте архив в любую папку (git не нужен).
+2. **Установите Python 3.10 или новее** с [python.org/downloads](https://www.python.org/downloads/).
+   В установщике Windows обязательно отметьте галочку **«Add python.exe to PATH»**.
+3. **Запустите на своей папке с фото.**
+   - **Windows:** перетащите папку с фотографиями на файл `run.bat`.
+   - **macOS:** двойной клик по `run.command` и выбор папки в диалоге (один раз в Терминале: `chmod +x run.sh run.command`).
+   - **Linux:** `./run.sh "путь/к/папке"` (один раз: `chmod +x run.sh`).
+4. **Подождите при первом запуске.** Скрипт сам создаст окружение `.venv`, установит нужные пакеты
+   и **скачает модели** (около 20 МБ) в папку `models/` (она создаётся автоматически). Нужен интернет,
+   это займёт несколько минут. Последующие запуски быстрые.
+5. **Заберите результат** в папке `best_face_output` внутри вашей папки с фото:
+   лучшие кадры — в `best/`, подробности — в `report.json`, обзор с превью — в `contact_sheet.html`
+   (откройте в браузере: там можно вручную поменять выбор).
+
+Если что-то пошло не так, текст ошибки и подсказка остаются в окне. Частые причины: не найден Python
+(переустановите с галочкой PATH), нет интернета при первом запуске (запустите ещё раз).
 
 ## Как это работает
 
@@ -42,12 +62,13 @@ python tune_weights.py "<результаты>/report.json" manual_choices.json
 - Результаты прошлого запуска в `best/` перед копированием удаляются, устаревшие `personNNNN_*` не накапливаются.
 - В отчёте помечаются персоны с единственным кадром (`single_frame`).
 
-## Установка
+## Установка (вручную)
 
-Нужен Python 3.10+.
+Если вы не пользуетесь `run.bat` / `run.sh`. Нужен Python 3.10+.
 
 ```bash
 pip install -r requirements.txt
+python download_models.py
 ```
 
 На Windows ставится `onnxruntime-directml` (GPU AMD/Intel/NVIDIA), на macOS и Linux — `onnxruntime`.
@@ -56,17 +77,19 @@ pip install -r requirements.txt
 
 ### Модели
 
-Положите файлы в папку `models/` (пути настраиваются в `config.yaml`):
+`python download_models.py` скачивает три основные модели в `models/` (папка создаётся сама)
+и проверяет их SHA-256. Эту же команду выполняет сама программа, если модели не найдены
+(отключается ключом `--no-download`). Остальное при необходимости — вручную:
 
 | Файл | Назначение | Откуда |
 | --- | --- | --- |
-| `face_detection_yunet_2023mar.onnx` | детектор лиц | [OpenCV Zoo](https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx) |
-| `w600k_mbf.onnx` | ArcFace 512-dim | архив [buffalo_s.zip](https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip) (InsightFace) |
-| `face_landmarker.task` | открытость глаз (EAR) | [MediaPipe](https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task) |
-| `nima_mobilenetv2.onnx` | эстетика лица (Q9) | `python export_nima.py` (нужны tensorflow и tf2onnx) |
-| `human_faceres.onnx` | узнаваемость, пол/возраст (опционально) | конвертация [HSE_FaceRec_tf](https://github.com/av-savchenko/HSE_FaceRec_tf) в ONNX |
+| `face_detection_yunet_2023mar.onnx` | детектор лиц | скачивается автоматически ([OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)) |
+| `w600k_mbf.onnx` | ArcFace 512-dim | скачивается автоматически (из архива [buffalo_s.zip](https://github.com/deepinsight/insightface/releases/tag/v0.7) InsightFace, берётся один файл) |
+| `face_landmarker.task` | глаза, взгляд, мимика, поза головы | скачивается автоматически ([MediaPipe](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker)) |
+| `nima_mobilenetv2.onnx` | эстетика лица (Q9), необязательно | `python export_nima.py` (нужны tensorflow и tf2onnx) |
+| `human_faceres.onnx` | узнаваемость, пол/возраст, необязательно | конвертация [HSE_FaceRec_tf](https://github.com/av-savchenko/HSE_FaceRec_tf) в ONNX |
 
-Необязательные модели (`nima`, `ear`, `faceres`) можно отключить, указав `null` в `config.yaml`.
+Без NIMA и FaceRes программа работает (`nima`/`faceres` в `config.yaml` можно указать как `null`).
 Без FaceRes метрика узнаваемости считается по ArcFace.
 
 ## Запуск
