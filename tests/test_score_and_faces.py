@@ -40,8 +40,17 @@ def _record(idx, ear_valid, q3):
 
 def test_eye_gate_only_applies_to_real_ear():
     cluster = PersonCluster(1)
-    cluster.frames = [_record(0, 1.0, 0.3), _record(1, 0.0, 0.3)]
+    cluster.frames = [_record(0, 1.0, 0.3), _record(1, 1.0, 0.9), _record(2, 0.0, 0.3)]
     cluster.compute_centroids()
     res = {r['frame'].file_idx: r for r in score_cluster(cluster)}
     assert res[0]['rejected_reason'] == 'eyes_closed'
     assert res[1]['passed_gates']
+    assert res[2]['passed_gates']
+
+
+def test_uniformly_low_eyes_are_not_treated_as_blinks():
+    # очки с бликами: у всех кадров серии «закрытые» глаза примерно одинаково
+    cluster = PersonCluster(1)
+    cluster.frames = [_record(0, 1.0, 0.54), _record(1, 1.0, 0.57)]
+    cluster.compute_centroids()
+    assert all(r['passed_gates'] for r in score_cluster(cluster))

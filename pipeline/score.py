@@ -44,7 +44,7 @@ _DEFAULT_GATES = {
     # больше чем на указанную величину (при наличии альтернатив); 0 — выключено
     'max_eye_gap':       0.08,
     'max_gaze_gap':      0.25,
-    'max_expr_gap':      0.15,
+    'max_expr_gap':      0.12,
 }
 
 # Резкость ≥ этой доли от эталона серии (90-й перцентиль) считается одинаково хорошей
@@ -54,6 +54,9 @@ _SHARP_SATURATION = 0.8
 # (узкий разрез глаз), его открытые глаза масштабируются к уровню _EYE_TARGET
 _EYE_BASELINE_MIN = 0.75
 _EYE_TARGET       = 0.90
+# Кадр с «закрытыми» глазами считается морганием, только если он хуже лучшего кадра серии
+# больше чем на это значение (иначе закрытыми выглядят все кадры — очки, блики)
+_EYE_SYSTEMATIC_GAP = 0.12
 
 
 def mark_manual(scored: List[dict], file_name: str) -> bool:
@@ -119,10 +122,13 @@ def score_cluster(
         q1_norm = [min(1.0, v / (_SHARP_SATURATION * sharp_ref)) for v in q1_raw]
     else:
         q1_norm = [1.0] * len(q1_raw)
-    q5_norm = _minmax(q5_raw)
-    # Q9 нормируем только если модель дала разные значения (иначе все 0.5 → minmax=1.0)
-    q9_all_same = max(q9_raw) - min(q9_raw) < 0.01
-    q9_norm = [0.5] * len(q9_raw) if q9_all_same else _minmax(q9_raw)
+    # Размер лица и эстетика — относительно лучшего кадра серии, а не min-max: у двух
+    # почти одинаковых кадров min-max растягивал разницу в 3% на весь диапазон 0..1
+    # и мог перевесить выражение лица.
+    q5_max = max(q5_raw) if q5_raw else 0.0
+    q5_norm = [min(1.0, v / (0.9 * q5_max)) if q5_max > 1e-9 else 1.0 for v in q5_raw]
+    q9_max = max(q9_raw) if q9_raw else 0.0
+    q9_norm = [max(0.0, 1.0 - (q9_max - v) / 0.25) for v in q9_raw]
 
     max_sharpness = max(q1_raw) if q1_raw else 1.0
 
@@ -150,6 +156,7 @@ def score_cluster(
 
     # Лучшие глаза этого человека: полузакрытые кадры сравниваются с ними
     q3_ref = min(1.0, float(np.percentile(ear_q3, 90)) * q3_scale) if len(ear_q3) >= 2 else None
+    q3_best_ok = max((q for q, ok in zip(q3_vals, ear_ok) if ok), default=1.0)
 
     # ── Взгляд, поза и выражение (Q4, Q10, Q11) ──────────────────────────────
     # Вертикальные сигналы взгляда сравниваются с типичными для этого человека:
@@ -179,7 +186,11 @@ def score_cluster(
 
     has_expr = ['EXPR_raw' in f.metrics for f in frames]
     has_gaze = ['GAZE_X_raw' in f.metrics for f in frames]
-    q4_ref = _ref(q4_vals, has_expr)
+    # Мимика сравнивается в «сырых» единицах выражения (без мёртвой зоны Q4): самое
+    # нейтральное лицо серии — эталон, любой кадр заметно «мимичнее» отсеивается
+    expr_vals = [f.metrics.get('EXPR_raw', 0.0) for f in frames]
+    expr_present = [x for x, ok in zip(expr_vals, has_expr) if ok]
+    expr_ref = float(np.percentile(expr_present, 10)) if len(expr_present) >= 2 else None
     q10_ref = _ref(q10_vals, has_gaze)
 
     results = []
@@ -212,9 +223,13 @@ def score_cluster(
         if f.frontal_ratio < gates.get('min_frontal_ratio', 0.45):
             rej = rej or 'not_frontal'
 
-        # Порог Q3 откалиброван под EAR; pixel-based fallback на другой шкале — не гейтим
-        if m.get('EAR_valid', 1.0) > 0.5 and m.get('Q3_eye_open', 1.0) < gates.get('min_ear', 0.58):
-            rej = rej or 'eyes_closed'
+        # Порог Q3 откалиброван под EAR; pixel-based fallback на другой шкале — не гейтим.
+        # Если глаза «закрыты» у ВСЕХ кадров серии примерно одинаково, это особенность
+        # человека или съёмки (очки с бликами, узкий разрез), а не моргание: не гейтим.
+        min_ear = gates.get('min_ear', 0.58)
+        if m.get('EAR_valid', 1.0) > 0.5 and m.get('Q3_eye_open', 1.0) < min_ear:
+            if q3_best_ok >= min_ear or (q3_best_ok - m['Q3_eye_open']) > _EYE_SYSTEMATIC_GAP:
+                rej = rej or 'eyes_closed'
 
         min_sharp_rel = gates.get('min_sharpness_rel', 0.15)
         if max_sharpness > 0 and q1_raw[i] < max_sharpness * min_sharp_rel:
@@ -237,7 +252,7 @@ def score_cluster(
             'gaps': {
                 'eyes_half_closed': (q3_ref - q3_vals[i]) if (q3_ref is not None and ear_ok[i]) else 0.0,
                 'gaze_off':         (q10_ref - q10_vals[i]) if (q10_ref is not None and has_gaze[i]) else 0.0,
-                'not_neutral':      (q4_ref - q4_vals[i]) if (q4_ref is not None and has_expr[i]) else 0.0,
+                'not_neutral':      (expr_vals[i] - expr_ref) if (expr_ref is not None and has_expr[i]) else 0.0,
             },
         })
 

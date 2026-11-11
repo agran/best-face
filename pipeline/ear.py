@@ -177,8 +177,8 @@ class EarEstimator:
                 + 0.5 * pair('mouthDimple')
                 + 1.0 * out['jaw_open']
                 + 0.7 * pair('mouthStretch')
-                + 0.7 * bs.get('mouthPucker', 0.0)
-                + 0.5 * bs.get('mouthFunnel', 0.0)
+                + 1.0 * bs.get('mouthPucker', 0.0)
+                + 0.7 * bs.get('mouthFunnel', 0.0)
                 + 0.8 * max(bs.get('browInnerUp', 0.0), pair('browOuterUp'))
                 + 0.5 * pair('cheekSquint')
                 + 0.5 * pair('mouthFrown')

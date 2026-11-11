@@ -61,7 +61,7 @@ def neutral_score(expr) -> float:
     """[0..1]: серьёзное, нейтральное лицо → 1; улыбка, открытый рот, поднятые брови → ниже."""
     if expr is None:
         return 0.5
-    return float(1.0 - min(1.0, max(0.0, (expr - 0.15) / 1.0)))
+    return float(1.0 - min(1.0, max(0.0, (expr - 0.05) / 1.0)))
 
 
 def q1_sharpness(face_crop: np.ndarray) -> float:
