@@ -295,6 +295,33 @@ def unpack_choices_file(path: str):
     return input_dir, data.get('output_dir') or None
 
 
+_OPENCV_DISTS = ('opencv-python', 'opencv-python-headless',
+                 'opencv-contrib-python', 'opencv-contrib-python-headless')
+
+
+def installed_opencv_packages() -> list:
+    """Имена установленных пакетов OpenCV (должен быть ровно один)."""
+    from importlib import metadata
+    found = []
+    for name in _OPENCV_DISTS:
+        try:
+            metadata.version(name)
+            found.append(name)
+        except metadata.PackageNotFoundError:
+            pass
+    return found
+
+
+def warn_if_duplicate_opencv() -> None:
+    """Несколько пакетов OpenCV пишут в один модуль cv2 и мешают друг другу: предупредить и подсказать лечение."""
+    found = installed_opencv_packages()
+    if len(found) > 1:
+        print(f'  [WARN] Установлено несколько пакетов OpenCV: {", ".join(found)}. '
+              f'Они конфликтуют (общий модуль cv2). Исправление:\n'
+              f'      pip uninstall -y {" ".join(found)}\n'
+              f'      pip install opencv-contrib-python')
+
+
 def open_folder(path: str) -> None:
     """Открыть папку в файловом менеджере (Проводник / Finder / xdg-open)."""
     try:
@@ -357,6 +384,7 @@ def main():
                         help='После завершения открыть папку с лучшими фото')
     args = parser.parse_args()
     global _AUTO_DOWNLOAD
+    warn_if_duplicate_opencv()
     _AUTO_DOWNLOAD = not args.no_download
 
     # Файл ручного выбора вместо папки: всё нужное (папка с фото, папка результатов)

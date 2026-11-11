@@ -78,6 +78,11 @@ pip install -r requirements.txt
 python download_models.py
 ```
 
+В окружении должен быть **один** пакет OpenCV: `opencv-contrib-python` (его же требует mediapipe). Если в вашем окружении
+уже стоят `opencv-python` или `opencv-python-headless`, удалите их (`pip uninstall -y opencv-python opencv-python-headless`) и поставьте
+`opencv-contrib-python`: два пакета пишут в один модуль `cv2` и мешают друг другу. Программа предупредит об этом при запуске.
+Скрипты `run.bat` / `run.sh` создают чистое окружение `.venv` и этой проблемы не имеют.
+
 На Windows ставится `onnxruntime-directml` (GPU AMD/Intel/NVIDIA), на macOS и Linux — `onnxruntime`.
 Для CUDA на NVIDIA замените пакет на `onnxruntime-gpu` (в окружении должен быть **только один** пакет `onnxruntime*`).
 Принудительный выбор провайдера: переменная `BEST_FACE_PROVIDER=cpu|cuda|dml|coreml`.
