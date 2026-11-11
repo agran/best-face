@@ -235,6 +235,14 @@ def _gender_str(g: Optional[float]) -> Optional[str]:
     return 'f' if g > 0 else 'm'
 
 
+REASON_RU = {
+    'eyes_closed': 'глаза закрыты', 'eyes_half_closed': 'глаза прищурены',
+    'gaze_off': 'взгляд в сторону', 'not_neutral': 'мимика / улыбка',
+    'mouth_open': 'рот открыт', 'yaw_too_large': 'голова повёрнута',
+    'pitch_too_large': 'голова вверх/вниз', 'head_tilted': 'голова наклонена',
+    'not_frontal': 'не анфас', 'blurry': 'нерезкий', 'low_confidence': 'низкая уверенность',
+}
+
 _HTML_HEAD = """<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -255,9 +263,11 @@ _HTML_HEAD = """<!DOCTYPE html>
   .frame { position:relative; border-radius:4px; overflow:hidden; cursor:pointer; }
   .frame img { display:block; border-radius:4px; object-fit:cover; }
   .frame.best { outline:3px solid #4f4; }
-  .frame.chosen { outline:3px solid #4af; }
+  .frame.rejected { opacity:0.55; outline:1px solid #f44; }
+  /* «выбрано вами» объявлено ПОСЛЕ best/rejected, чтобы перекрывать их (одинаковая специфичность):
+     иначе выбор забракованного кадра был бы невиден */
+  .frame.chosen { opacity:1; outline:3px solid #4af; }
   .frame.chosen.best { outline:3px solid #4af; box-shadow:0 0 0 3px #4f4; }
-  .frame.rejected { opacity:0.45; outline:1px solid #f44; }
   .frame .open { position:absolute; top:2px; right:2px; background:rgba(0,0,0,0.6);
                  color:#fff; text-decoration:none; font-size:12px; padding:1px 5px;
                  border-radius:3px; }
@@ -265,8 +275,8 @@ _HTML_HEAD = """<!DOCTYPE html>
                   background:rgba(0,0,0,0.72); font-size:10px; padding:2px 4px;
                   text-align:center; }
   .frame.best .badge { color:#4f4; }
-  .frame.chosen .badge { color:#4af; }
   .frame.rejected .badge { color:#f88; }
+  .frame.chosen .badge { color:#4af; font-weight:bold; }
   .score { color:#fda; }
   .toolbar { position:sticky; top:0; z-index:10; background:#111; padding:8px 12px;
              border-bottom:1px solid #444; margin:-16px -16px 16px; font-size:13px; }
@@ -280,7 +290,7 @@ _HTML_HEAD = """<!DOCTYPE html>
   <span>Выбрано вручную: <b id="cnt">0</b></span>
   <button id="save">Скачать manual_choices.json</button>
   <button id="reset">Сбросить выбор</button>
-  <span style="color:#888">клик по превью — выбрать лучший кадр вручную, ↗ — открыть оригинал</span>
+  <span style="color:#888">клик по превью — выбрать лучший кадр вручную (можно и забракованный, затемнённый), повторный клик — снять выбор, ↗ — открыть оригинал</span>
 </div>
 """
 
@@ -293,7 +303,11 @@ let choices = JSON.parse(localStorage.getItem(KEY) || '{}');
 function apply() {
   document.querySelectorAll('.frame').forEach(f => {
     const p = f.closest('.person').dataset.person;
-    f.classList.toggle('chosen', choices[p] === f.dataset.file);
+    const chosen = choices[p] === f.dataset.file;
+    const b = f.querySelector('.badge');
+    if (!b.dataset.orig) b.dataset.orig = b.innerHTML;
+    f.classList.toggle('chosen', chosen);
+    b.innerHTML = chosen ? '✔ ВАШ ВЫБОР' : b.dataset.orig;
   });
   document.getElementById('cnt').textContent = Object.keys(choices).length;
 }
@@ -420,9 +434,11 @@ def build_contact_sheet(
             href = Path(f_rec.path).resolve().as_uri()
 
             score_str = f'{r["score"]:.2f}'
-            reason    = html_mod.escape(r['rejected_reason'] or '')
+            code      = r['rejected_reason'] or ''
+            reason    = html_mod.escape(REASON_RU.get(code, code))
             label     = ('★ BEST' if is_best else
-                         (reason if reason else f'<span class="score">{score_str}</span>'))
+                         (f'{reason} · <span class="score">{score_str}</span>' if reason
+                          else f'<span class="score">{score_str}</span>'))
 
             parts.append(
                 f'<div class="{css_cls}" title="{html_mod.escape(fname)}" '
