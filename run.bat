@@ -11,28 +11,28 @@ if "%~1"=="" goto usage
 
 set "SRC=%~1"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
-if not exist "%SRC%\" goto notdir
+if not exist "%SRC%" goto notdir
 
 call :ensure_env
 if errorlevel 1 goto envfailed
 
-".venv\Scripts\python.exe" best_face.py "%SRC%" %2 %3 %4 %5 %6 %7 %8 %9
+".venv\Scripts\python.exe" best_face.py "%SRC%" --open %2 %3 %4 %5 %6 %7 %8 %9
 set "RC=%ERRORLEVEL%"
 
 echo.
 if not "%RC%"=="0" goto failed
-echo Готово. Открываю папку с лучшими фото...
-if exist "%SRC%\best_face_output\best" start "" explorer "%SRC%\best_face_output\best"
+echo Готово.
 goto done
 
 :usage
 echo Перетащите папку с фотографиями на этот файл.
+echo Чтобы применить ручной выбор, перетащите на этот файл скачанный из контактного листа manual_choices.json.
 echo Либо запустите из консоли: run.bat "путь\к\папке" [--limit N] [--output папка]
 set "RC=1"
 goto done
 
 :notdir
-echo Это не папка: "%SRC%"
+echo Не найдена папка или файл: "%SRC%"
 set "RC=1"
 goto done
 

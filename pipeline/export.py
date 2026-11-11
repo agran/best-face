@@ -259,6 +259,9 @@ _HTML_HEAD = """<!DOCTYPE html>
 """
 
 _HTML_TAIL = """<script>
+// Откуда сформирован лист: попадает в manual_choices.json, чтобы файл можно было просто
+// перетащить на run.bat / run.sh — программа сама найдёт папку с фото и результат
+const META = __META__;
 const KEY = 'bestface:' + location.pathname;
 let choices = JSON.parse(localStorage.getItem(KEY) || '{}');
 function apply() {
@@ -282,7 +285,7 @@ document.getElementById('reset').addEventListener('click', () => {
   choices = {}; localStorage.removeItem(KEY); apply();
 });
 document.getElementById('save').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify({choices}, null, 2)], {type: 'application/json'});
+  const blob = new Blob([JSON.stringify({...META, choices}, null, 2)], {type: 'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'manual_choices.json'; a.click();
 });
@@ -290,6 +293,12 @@ apply();
 </script>
 </body></html>
 """
+
+
+def render_html_tail(meta: dict) -> str:
+    """Скрипт контактного листа с вшитыми сведениями о папках (для manual_choices.json)."""
+    payload = json.dumps(meta, ensure_ascii=False).replace('</', '<\\/')
+    return _HTML_TAIL.replace('__META__', payload)
 
 
 def build_contact_sheet(
@@ -400,7 +409,9 @@ def build_contact_sheet(
 
         parts.append('</div></div>\n')
 
-    parts.append(_HTML_TAIL)
+    params = report.get('params', {})
+    meta = {'input_dir': params.get('input_dir'), 'output_dir': params.get('output_dir')}
+    parts.append(render_html_tail(meta))
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(''.join(parts))

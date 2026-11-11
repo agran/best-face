@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Запуск Best-Face на macOS и Linux.
 #   ./run.sh "/путь/к/папке/с/фото" [--limit N] [--output папка] [--no-contact-sheet]
+#   ./run.sh "/путь/к/manual_choices.json"   — применить ручной выбор из контактного листа
 # Без аргументов откроется диалог выбора папки (macOS/zenity/kdialog) или запрос в консоли.
 # При первом запуске создаётся окружение .venv и ставятся зависимости.
 set -u
@@ -70,24 +71,18 @@ case "$SRC" in
 esac
 if [ "${#SRC}" -gt 1 ]; then SRC="${SRC%/}"; fi
 
-if [ ! -d "$SRC" ]; then
-    echo "Это не папка: $SRC"
+if [ ! -e "$SRC" ]; then
+    echo "Не найдена папка или файл: $SRC"
     pause; exit 1
 fi
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
-"$PY" best_face.py "$SRC" "$@"
+"$PY" best_face.py "$SRC" --open "$@"
 RC=$?
 
 echo
 if [ "$RC" -eq 0 ]; then
-    OUT="$SRC/best_face_output/best"
-    if [ -d "$OUT" ]; then
-        echo "Готово. Лучшие фото: $OUT"
-        if [ "$(uname)" = "Darwin" ]; then open "$OUT"
-        elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$OUT" >/dev/null 2>&1 || true
-        fi
-    fi
+    echo "Готово."
 else
     echo "Завершено с ошибкой, код $RC."
     if [ "$RC" -eq 2 ]; then

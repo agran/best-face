@@ -14,6 +14,7 @@ best_face.py — главный скрипт отбора лучших фото 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -264,6 +265,45 @@ def apply_manual_choices(path: str, scored_by_cluster: list) -> None:
           + (f' (не найдено в папке: {missing})' if missing else ''))
 
 
+def unpack_choices_file(path: str):
+    """
+    Разобрать manual_choices.json, скачанный из контактного листа.
+    Возвращает (папка_с_фото, папка_результатов). Бросает ValueError с понятным сообщением,
+    если файл не подходит для запуска «одним перетаскиванием».
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ValueError(f'Не удалось прочитать файл выбора {path}: {e}')
+    if not isinstance(data, dict) or not isinstance(data.get('choices'), dict):
+        raise ValueError(f'{path}: это не файл ручного выбора (нет раздела "choices").')
+    input_dir = data.get('input_dir')
+    if not input_dir:
+        raise ValueError(
+            f'В {path} не указана папка с фото (файл создан старой версией контактного листа).\n'
+            f'Откройте актуальный contact_sheet.html (запустите программу на папке с фото ещё раз), '
+            f'выберите кадры и скачайте файл заново; либо запустите так: '
+            f'python best_face.py "папка_с_фото" --choices "{path}"')
+    if not os.path.isdir(input_dir):
+        raise ValueError(f'Папка с фото из файла выбора недоступна: {input_dir}\n'
+                         f'(диск не подключён или папку переместили?)')
+    return input_dir, data.get('output_dir') or None
+
+
+def open_folder(path: str) -> None:
+    """Открыть папку в файловом менеджере (Проводник / Finder / xdg-open)."""
+    try:
+        if sys.platform == 'win32':
+            os.startfile(path)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', path])
+        else:
+            subprocess.Popen(['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f'  [WARN] Не удалось открыть папку {path}: {e}')
+
+
 # ─── Прогресс-бар ─────────────────────────────────────────────────────────────
 
 class _SimpleProgress:
@@ -292,7 +332,9 @@ class _SimpleProgress:
 
 def main():
     parser = argparse.ArgumentParser(description='Отбор лучших фото из серий')
-    parser.add_argument('input_dir',              help='Папка с фотографиями')
+    parser.add_argument('input_dir',
+                        help='Папка с фотографиями ИЛИ файл manual_choices.json из контактного листа '
+                             '(тогда папки берутся из него и ручной выбор применяется автоматически)')
     parser.add_argument('--config',  default=str(Path(__file__).parent / 'config.yaml'),
                         help='Путь к config.yaml')
     parser.add_argument('--output',  default=None,
@@ -307,9 +349,28 @@ def main():
                         help='Не скачивать недостающие модели автоматически')
     parser.add_argument('--choices', default=None, metavar='manual_choices.json',
                         help='Применить ручной выбор лучших кадров, скачанный из контактного листа')
+    parser.add_argument('--open', action='store_true',
+                        help='После завершения открыть папку с лучшими фото')
     args = parser.parse_args()
     global _AUTO_DOWNLOAD
     _AUTO_DOWNLOAD = not args.no_download
+
+    # Файл ручного выбора вместо папки: всё нужное (папка с фото, папка результатов)
+    # записано в нём самом — достаточно перетащить его на run.bat
+    if os.path.isfile(args.input_dir):
+        if not args.input_dir.lower().endswith('.json'):
+            print(f'ОШИБКА: ожидалась папка с фото или файл manual_choices.json, получено: {args.input_dir}')
+            sys.exit(1)
+        try:
+            src_dir, out_dir = unpack_choices_file(args.input_dir)
+        except ValueError as e:
+            print(f'ОШИБКА: {e}')
+            sys.exit(1)
+        print(f'Применяю ручной выбор из {args.input_dir}')
+        args.choices = args.choices or args.input_dir
+        args.input_dir = src_dir
+        if args.output is None and out_dir:
+            args.output = out_dir
 
     # ── Конфиг ──────────────────────────────────────────────────────────────
     cfg = load_config(args.config)
@@ -536,7 +597,8 @@ def main():
     print(f'\nЭкспорт результатов...')
 
     params = {
-        'input_dir':         args.input_dir,
+        'input_dir':         os.path.abspath(args.input_dir),
+        'output_dir':        os.path.abspath(base),
         'total_photos':      len(all_photos),
         'threshold_cluster': cfg_cluster.get('threshold', 0.50),
         'clustering':        cfg_cluster,
@@ -584,6 +646,8 @@ def main():
         print(f'  Выбрано вручную:        {s["manual_choices"]}')
     print(f'{"="*50}')
     print(f'  Результаты: {Path(best_dir).parent.resolve()}')
+    if args.open and not os.environ.get('BEST_FACE_NO_OPEN'):
+        open_folder(str(Path(best_dir).resolve()))
 
 
 if __name__ == '__main__':
