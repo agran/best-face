@@ -3,7 +3,7 @@
 # ============================================================
 
 models:
-  # Скачайте модели в папку models/ (см. README.md)
+  # Модели лежат в папке models/ (w600k_mbf.onnx скачивается при первом запуске, см. README.md)
   # Детектор лиц (YuNet, cv2.FaceDetectorYN)
   detector: "models/face_detection_yunet_2023mar.onnx"
   # ArcFace 512-dim — для группировки серий
@@ -12,18 +12,16 @@ models:
   # null — отключить: Q8 тогда считается по ArcFace-эмбеддингам
   faceres: "models/human_faceres.onnx"
   # NIMA aesthetic quality scorer (MobileNetV2, обучен на AVA)
-  # Создайте модель: python export_nima.py
-  # null — отключить Q9 (Q8 сохранит вес 0.25)
+  # Модель лежит в репозитории (пересборка: python export_nima.py)
+  # null — отключить Q9: вместо NIMA используется оценка освещения по гистограмме
   nima: "models/nima_mobilenetv2.onnx"
-  # MediaPipe FaceLandmarker — для надёжного EAR (открытость глаз) через 478 ландмарков
-  # Скачайте вручную (см. README.md):
-  #   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
-  # null — отключить (Q3 будет pixel-based, менее надёжный)
+  # MediaPipe FaceLandmarker: глаза (EAR), взгляд, мимика (blendshapes), поза головы.
+  # null — отключить (глаза будут оцениваться по пикселям, взгляд не оценивается)
   ear: "models/face_landmarker.task"
 
 detection:
   conf_threshold: 0.5 # минимальный confidence детектора
-  nms_threshold: 0.4 # NMS IoU (совпадает с Face-ID Kiosk)
+  nms_threshold: 0.4 # NMS IoU
   min_face_px: 50 # минимальный размер лица в пикселях (меньшая сторона bbox)
   max_det_size: 1280 # на такую ширину масштабируем изображение перед детекцией
   # Какое лицо брать, если в кадре их несколько: largest | central | best_conf
@@ -68,11 +66,11 @@ scoring:
     Q1_sharpness: 0.12 # резкость (≥80% от эталона серии = «одинаково резко»)
     Q2_frontality: 0.08 # фронтальность по 5 точкам
     Q3_eye_open: 0.15 # открытость глаз (EAR + blink + squint)
-    Q4_expression: 0.17 # нейтральность выражения: улыбка, открытый рот, поднятые брови — штраф
+    Q4_expression: 0.17 # нейтральность выражения: улыбка, открытый рот, хмурость, поднятые брови — штраф
     Q5_face_size: 0.04 # размер лица
     Q6_exposure: 0.04 # экспозиция / освещение
     Q7_confidence: 0.02 # confidence детектора
-    Q8_centrality: 0.10 # «узнаваемость» = близость к центроиду серии (FaceRes)
+    Q8_centrality: 0.10 # «узнаваемость» = близость к центроиду группы (FaceRes)
     Q9_nima: 0.06 # NIMA aesthetic значение: освещение/композиция кропа лица
     Q10_gaze: 0.12 # взгляд в камеру (радужка + eyeLook*, с учётом поворота головы)
     Q11_pose: 0.10 # голова ровно: гладкий штраф за yaw, pitch и наклон (roll)
@@ -82,7 +80,7 @@ scoring:
     max_pitch_deg: 20.0 # наклон вверх/вниз (нужен MediaPipe; иначе не применяется)
     max_roll_deg: 15.0 # наклон головы к плечу (нужен MediaPipe)
     max_jaw_open: 0.10 # открытый рот (blendshape jawOpen; нужен MediaPipe)
-    min_frontal_ratio: 0.45 # как в Face-ID Kiosk (0=профиль, 1=анфас)
+    min_frontal_ratio: 0.45 # фронтальность по 5 точкам (0=профиль, 1=анфас)
     min_ear: 0.58 # минимальный Q3 eye_open: открытые~0.65-0.85, прикрытые~0.42-0.58
     min_sharpness_rel: 0.15 # кадр выбрасывается если sharpness < max_sharpness * rel
     # Относительные фильтры: кадр выбывает, если он хуже лучших кадров ЭТОГО ЖЕ человека
@@ -90,11 +88,6 @@ scoring:
     max_eye_gap: 0.08 # полузакрытые глаза / прищур
     max_gaze_gap: 0.25 # взгляд в сторону, вверх или вниз
     max_expr_gap: 0.12 # улыбка, губы трубочкой и другая мимика (в единицах выражения; эталон — самое нейтральное лицо серии)
+
 performance:
   workers: 4 # потоков для чтения и декодирования JPEG (предзагрузка кадров)
-
-output:
-  best_dir: "output/best"
-  rejected_dir: "output/rejected"
-  report_file: "output/report.json"
-  contact_sheet: "output/contact_sheet.html" # null — не генерировать
