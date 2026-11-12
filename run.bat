@@ -9,14 +9,23 @@ rem папки может содержать скобки, например "Н�
 
 if "%~1"=="" goto usage
 
-set "SRC=%~1"
-if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
-if not exist "%SRC%" goto notdir
-
 call :ensure_env
 if errorlevel 1 goto envfailed
 
-".venv\Scripts\python.exe" best_face.py "%SRC%" --open %2 %3 %4 %5 %6 %7 %8 %9
+rem Собираем все перетащенные пути (и ключи) в одну строку: каждый в кавычках,
+rem без завершающего "\" (иначе "C:\папка\" съедает закрывающую кавычку)
+set "ARGS="
+:collect
+if "%~1"=="" goto run
+set "ITEM=%~1"
+if "%ITEM:~-1%"=="\" set "ITEM=%ITEM:~0,-1%"
+if "%ITEM:~-1%"==":" set "ITEM=%ITEM%/"
+set "ARGS=%ARGS% "%ITEM%""
+shift
+goto collect
+
+:run
+".venv\Scripts\python.exe" best_face.py --open %ARGS%
 set "RC=%ERRORLEVEL%"
 
 echo.
@@ -25,14 +34,10 @@ echo Готово.
 goto done
 
 :usage
-echo Перетащите папку с фотографиями на этот файл.
+echo Перетащите одну или несколько папок с фотографиями на этот файл.
+echo Результат каждой папки сохраняется в её подпапке best_face_output.
 echo Чтобы применить ручной выбор, перетащите на этот файл скачанный из контактного листа manual_choices.json.
-echo Либо запустите из консоли: run.bat "путь\к\папке" [--limit N] [--output папка]
-set "RC=1"
-goto done
-
-:notdir
-echo Не найдена папка или файл: "%SRC%"
+echo Либо запустите из консоли: run.bat "путь\к\папке" ["другая папка" ...] [--limit N] [--output папка]
 set "RC=1"
 goto done
 
@@ -43,7 +48,7 @@ set "RC=1"
 goto done
 
 :failed
-echo Завершено с ошибкой, код %RC%.
+echo Завершено с ошибкой, код %RC%. Если папок было несколько, смотрите итог по каждой выше.
 if "%RC%"=="2" echo Скорее всего, не найдены файлы моделей: проверьте интернет и запустите download_models.py, либо положите файлы в папку models\ ^(см. README.md^).
 goto done
 

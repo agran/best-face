@@ -3,11 +3,12 @@
 best_face.py — главный скрипт отбора лучших фото из серий.
 
 Использование:
-  python best_face.py <папка_с_фото> [--config config.yaml] [--output output/]
+  python best_face.py <папка_с_фото> [<ещё папки>...] [--config config.yaml] [--output output/]
                      [--limit N] [--no-contact-sheet]
 
 Примеры:
   python best_face.py "D:/photos/session1"
+  python best_face.py "D:/photos/class_A" "D:/photos/class_B"   # у каждой папки свой best_face_output
   python best_face.py photos/ --output results/ --limit 100
 """
 
@@ -361,58 +362,89 @@ class _SimpleProgress:
 
 # ─── Главная функция ───────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description='Отбор лучших фото из серий')
-    parser.add_argument('input_dir',
-                        help='Папка с фотографиями ИЛИ файл manual_choices.json из контактного листа '
-                             '(тогда папки берутся из него и ручной выбор применяется автоматически)')
-    parser.add_argument('--config',  default=str(Path(__file__).parent / 'config.yaml'),
-                        help='Путь к config.yaml')
-    parser.add_argument('--output',  default=None,
-                        help='Папка для результатов (переопределяет output в конфиге)')
-    parser.add_argument('--limit',   type=int, default=0,
-                        help='Обработать только первые N фото (0 = все)')
-    parser.add_argument('--no-contact-sheet', action='store_true',
-                        help='Не генерировать HTML-контактный лист')
-    parser.add_argument('--no-cache', action='store_true',
-                        help='Не использовать кэш обработанных кадров (frame_cache.npz)')
-    parser.add_argument('--no-download', action='store_true',
-                        help='Не скачивать недостающие модели автоматически')
-    parser.add_argument('--choices', default=None, metavar='manual_choices.json',
-                        help='Применить ручной выбор лучших кадров, скачанный из контактного листа')
-    parser.add_argument('--open', action='store_true',
-                        help='После завершения открыть папку с лучшими фото')
-    args = parser.parse_args()
-    global _AUTO_DOWNLOAD
-    warn_if_duplicate_opencv()
-    _AUTO_DOWNLOAD = not args.no_download
+class FolderError(Exception):
+    """Ошибка обработки одной папки: остальные перетащенные папки всё равно обрабатываются."""
 
+
+class _ArgParser(argparse.ArgumentParser):
+    def error(self, message):
+        # Код 64, чтобы run.bat не путал ошибку ключей с ненайденными моделями (код 2)
+        self.print_usage(sys.stderr)
+        self.exit(64, f'{self.prog}: ошибка: {message}\n')
+
+
+class Models:
+    """Модели загружаются один раз и переиспользуются для всех перетащенных папок."""
+
+    def __init__(self, cfg: dict):
+        cfg_det    = cfg.get('detection', {})
+        cfg_models = cfg.get('models',    {})
+        t0 = time.time()
+        print('Загружаем модели...')
+        self.det_path     = resolve_model_path(cfg_models['detector'], 'detector')
+        self.arc_path     = resolve_model_path(cfg_models['arcface'], 'arcface')
+        self.faceres_path = resolve_model_path(cfg_models.get('faceres'), 'faceres', required=False)
+        self.nima_path    = resolve_model_path(cfg_models.get('nima'), 'nima', required=False)
+        self.ear_path     = resolve_model_path(
+            cfg_models.get('ear', 'models/face_landmarker.task'), 'ear', required=False)
+
+        self.detector = FaceDetector(
+            model_path      = self.det_path,
+            conf_threshold  = cfg_det.get('conf_threshold', 0.5),
+            nms_threshold   = cfg_det.get('nms_threshold',  0.4),
+            max_det_size    = cfg_det.get('max_det_size',   1280),
+        )
+        self.arc  = ArcFaceEmbedder(self.arc_path)
+        self.res  = FaceResEmbedder(self.faceres_path) if self.faceres_path else None
+        if self.res is None:
+            print('  FaceResEmbedder:  отключён — Q8 считается по ArcFace')
+        self.nima = NimaScorer(self.nima_path)
+        self.ear  = EarEstimator(self.ear_path)
+        self.fingerprints = [file_fingerprint(p) for p in (
+            self.det_path, self.arc_path, self.faceres_path, self.nima_path, self.ear_path)]
+        print(f'Модели загружены за {time.time()-t0:.1f}s')
+
+
+def resolve_job(item: str, args, used_names: set, multi: bool):
+    """Что обрабатывать для одного перетащенного пути: (папка с фото, папка результатов, файл выбора).
+
+    Результаты каждой папки по умолчанию лежат в её подпапке best_face_output.
+    """
+    choices = args.choices
+    input_dir, output = item, None
     # Файл ручного выбора вместо папки: всё нужное (папка с фото, папка результатов)
     # записано в нём самом — достаточно перетащить его на run.bat
-    if os.path.isfile(args.input_dir):
-        if not args.input_dir.lower().endswith('.json'):
-            print(f'ОШИБКА: ожидалась папка с фото или файл manual_choices.json, получено: {args.input_dir}')
-            sys.exit(1)
+    if os.path.isfile(item):
+        if not item.lower().endswith('.json'):
+            raise FolderError(f'ожидалась папка с фото или файл manual_choices.json, получено: {item}')
         try:
-            src_dir, out_dir = unpack_choices_file(args.input_dir)
+            input_dir, output = unpack_choices_file(item)
         except ValueError as e:
-            print(f'ОШИБКА: {e}')
-            sys.exit(1)
-        print(f'Применяю ручной выбор из {args.input_dir}')
-        args.choices = args.choices or args.input_dir
-        args.input_dir = src_dir
-        if args.output is None and out_dir:
-            args.output = out_dir
-
-    # ── Конфиг ──────────────────────────────────────────────────────────────
-    cfg = load_config(args.config)
-
-    out_cfg = cfg.get('output', {})
+            raise FolderError(str(e))
+        print(f'Применяю ручной выбор из {item}')
+        choices = choices or item
     if args.output:
-        base = args.output
+        # Для нескольких папок --output — общий родитель, у каждой папки своя подпапка
+        if multi:
+            name = Path(input_dir).resolve().name or 'root'
+            unique, n = name, 1
+            while unique in used_names:
+                n += 1
+                unique = f'{name}_{n}'
+            used_names.add(unique)
+            output = os.path.join(args.output, unique)
+        else:
+            output = args.output
+    return input_dir, output, choices
+
+
+def process_folder(input_dir: str, output, choices, args, cfg: dict, get_models):
+    """Обработать одну папку; возвращает summary отчёта (None — в папке нет фото)."""
+    if output:
+        base = output
     else:
         # По умолчанию: подпапка внутри папки с фото
-        base = str(Path(args.input_dir) / 'best_face_output')
+        base = str(Path(input_dir) / 'best_face_output')
 
     best_dir     = os.path.join(base, 'best')
     rejected_dir = os.path.join(base, 'rejected')
@@ -425,52 +457,27 @@ def main():
     cfg_det     = cfg.get('detection',  {})
     cfg_cluster = cfg.get('clustering', {})
     cfg_scoring = cfg.get('scoring',    {})
-    cfg_models  = cfg.get('models',     {})
 
     # ── Сканирование ────────────────────────────────────────────────────────
-    if not os.path.isdir(args.input_dir):
-        print(f'ОШИБКА: папка с фото не найдена: {args.input_dir}')
-        sys.exit(1)
-    print(f'Сканируем: {args.input_dir}')
-    all_photos = scan_photos(args.input_dir)
+    if not os.path.isdir(input_dir):
+        raise FolderError(f'папка с фото не найдена: {input_dir}')
+    print(f'Сканируем: {input_dir}')
+    all_photos = scan_photos(input_dir)
     if args.limit > 0:
         all_photos = all_photos[:args.limit]
     print(f'Найдено файлов: {len(all_photos)}')
 
     if not all_photos:
         print('Нет фото для обработки.')
-        sys.exit(0)
+        return None
 
-    # ── Загрузка моделей ────────────────────────────────────────────────────
-    print('Загружаем модели...')
-    t0 = time.time()
-
-    policy = cfg_det.get('multi_face_policy', 'largest')
-    if policy not in _MULTI_FACE_POLICIES:
-        print(f'ОШИБКА: multi_face_policy={policy!r}, допустимо: {_MULTI_FACE_POLICIES}')
-        sys.exit(2)
-
-    det_path      = resolve_model_path(cfg_models['detector'], 'detector')
-    arc_path      = resolve_model_path(cfg_models['arcface'], 'arcface')
-    faceres_path  = resolve_model_path(cfg_models.get('faceres'), 'faceres', required=False)
-    nima_path     = resolve_model_path(cfg_models.get('nima'), 'nima', required=False)
-    ear_path      = resolve_model_path(
-        cfg_models.get('ear', 'models/face_landmarker.task'), 'ear', required=False)
-
-    detector     = FaceDetector(
-        model_path      = det_path,
-        conf_threshold  = cfg_det.get('conf_threshold', 0.5),
-        nms_threshold   = cfg_det.get('nms_threshold',  0.4),
-        max_det_size    = cfg_det.get('max_det_size',   1280),
-    )
-    embedder_arc  = ArcFaceEmbedder(arc_path)
-    embedder_res  = FaceResEmbedder(faceres_path) if faceres_path else None
-    if embedder_res is None:
-        print('  FaceResEmbedder:  отключён — Q8 считается по ArcFace')
-    embedder_nima = NimaScorer(nima_path)
-    ear_estimator = EarEstimator(ear_path)
-
-    print(f'Модели загружены за {time.time()-t0:.1f}s')
+    models        = get_models()
+    policy        = cfg_det.get('multi_face_policy', 'largest')
+    detector      = models.detector
+    embedder_arc  = models.arc
+    embedder_res  = models.res
+    embedder_nima = models.nima
+    ear_estimator = models.ear
 
     # ── Обработка кадров ────────────────────────────────────────────────────
     print(f'\nШаг 1/3: Детекция + эмбеддинги ({len(all_photos)} фото)...')
@@ -479,7 +486,7 @@ def main():
     rejected_records: list[FrameRecord] = []
 
     cache_sig = make_signature(
-        models=[file_fingerprint(p) for p in (det_path, arc_path, faceres_path, nima_path, ear_path)],
+        models=models.fingerprints,
         detection=cfg_det, policy=policy,
     )
     cache = FrameCache(os.path.join(base, 'frame_cache.npz'), cache_sig,
@@ -556,16 +563,12 @@ def main():
     print(f'  Отклонено (нет лица / ошибка): {n_rejected}')
 
     if n_valid == 0:
-        print('Лица не найдены. Проверьте входные данные.')
-        sys.exit(1)
+        raise FolderError('лица не найдены, проверьте входные данные')
 
     # ── Кластеризация ───────────────────────────────────────────────────────
     print(f'\nШаг 2/3: Кластеризация серий...')
     t1 = time.time()
     cluster_mode = cfg_cluster.get('mode', 'person')
-    if cluster_mode not in ('person', 'series'):
-        print(f"ОШИБКА: clustering.mode={cluster_mode!r}, допустимо: 'person' | 'series'")
-        sys.exit(2)
 
     clusters = cluster_frames(
         frames           = all_records,
@@ -604,8 +607,8 @@ def main():
     ]
 
     # Ручной выбор из контактного листа: ищем кадр по имени файла среди всех кластеров
-    if args.choices:
-        apply_manual_choices(args.choices, scored_by_cluster)
+    if choices:
+        apply_manual_choices(choices, scored_by_cluster)
 
     # Нумерация персон — в порядке исходной папки: по номеру файла лучшего кадра,
     # чтобы порядок person0001, person0002... в best/ совпадал с порядком съёмки
@@ -632,7 +635,7 @@ def main():
     print(f'\nЭкспорт результатов...')
 
     params = {
-        'input_dir':         os.path.abspath(args.input_dir),
+        'input_dir':         os.path.abspath(input_dir),
         'output_dir':        os.path.abspath(base),
         'total_photos':      len(all_photos),
         'threshold_cluster': cfg_cluster.get('threshold', 0.50),
@@ -683,6 +686,90 @@ def main():
     print(f'  Результаты: {Path(best_dir).parent.resolve()}')
     if args.open and not os.environ.get('BEST_FACE_NO_OPEN'):
         open_folder(str(Path(best_dir).resolve()))
+    return {**s, 'output_dir': str(Path(base).resolve())}
+
+
+def main():
+    parser = _ArgParser(description='Отбор лучших фото из серий')
+    parser.add_argument('inputs', nargs='+', metavar='input',
+                        help='Одна или несколько папок с фотографиями и/или файлы manual_choices.json '
+                             'из контактного листа (папки берутся из файла, ручной выбор применяется '
+                             'автоматически). Результат каждой папки — в её подпапке best_face_output')
+    parser.add_argument('--config',  default=str(Path(__file__).parent / 'config.yaml'),
+                        help='Путь к config.yaml')
+    parser.add_argument('--output',  default=None,
+                        help='Папка для результатов (для нескольких папок — общий родитель, '
+                             'внутри подпапка на каждую)')
+    parser.add_argument('--limit',   type=int, default=0,
+                        help='Обработать только первые N фото в каждой папке (0 = все)')
+    parser.add_argument('--no-contact-sheet', action='store_true',
+                        help='Не генерировать HTML-контактный лист')
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Не использовать кэш обработанных кадров (frame_cache.npz)')
+    parser.add_argument('--no-download', action='store_true',
+                        help='Не скачивать недостающие модели автоматически')
+    parser.add_argument('--choices', default=None, metavar='manual_choices.json',
+                        help='Применить ручной выбор лучших кадров, скачанный из контактного листа')
+    parser.add_argument('--open', action='store_true',
+                        help='После завершения открыть папку с лучшими фото')
+    args = parser.parse_args()
+    if args.choices and len(args.inputs) > 1:
+        parser.error('--choices работает только с одной папкой; '
+                     'для нескольких перетащите их manual_choices.json')
+
+    global _AUTO_DOWNLOAD
+    warn_if_duplicate_opencv()
+    _AUTO_DOWNLOAD = not args.no_download
+
+    cfg = load_config(args.config)
+    policy = cfg.get('detection', {}).get('multi_face_policy', 'largest')
+    if policy not in _MULTI_FACE_POLICIES:
+        print(f'ОШИБКА: multi_face_policy={policy!r}, допустимо: {_MULTI_FACE_POLICIES}')
+        sys.exit(2)
+    cluster_mode = cfg.get('clustering', {}).get('mode', 'person')
+    if cluster_mode not in ('person', 'series'):
+        print(f"ОШИБКА: clustering.mode={cluster_mode!r}, допустимо: 'person' | 'series'")
+        sys.exit(2)
+
+    models_box: list = []
+
+    def get_models():
+        if not models_box:
+            models_box.append(Models(cfg))
+        return models_box[0]
+
+    multi = len(args.inputs) > 1
+    used_names: set = set()
+    outcomes = []   # (путь, summary | None, ошибка | None)
+    for n, item in enumerate(args.inputs, start=1):
+        if multi:
+            print(f'\n{"#"*60}\n# Папка {n} из {len(args.inputs)}: {item}\n{"#"*60}')
+        try:
+            input_dir, output, choices = resolve_job(item, args, used_names, multi)
+            summary = process_folder(input_dir, output, choices, args, cfg, get_models)
+            outcomes.append((item, summary, None))
+        except FolderError as e:
+            print(f'ОШИБКА: {e}')
+            outcomes.append((item, None, str(e)))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            outcomes.append((item, None, f'{type(e).__name__}: {e}'))
+
+    failed = sum(1 for _, _, err in outcomes if err)
+    if multi:
+        print(f'\n{"="*60}\nИТОГО по папкам: {len(outcomes) - failed} из {len(outcomes)} обработано'
+              + (f', с ошибкой: {failed}' if failed else ''))
+        for item, summary, err in outcomes:
+            if err:
+                print(f'  ✖ {item}: {err}')
+            elif summary is None:
+                print(f'  – {item}: нет фото')
+            else:
+                print(f'  ✔ {item}: персон {summary["total_persons"]}, '
+                      f'без лица {summary["total_rejected"]} → {summary["output_dir"]}')
+        print('=' * 60)
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == '__main__':

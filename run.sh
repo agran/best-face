@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Запуск Best-Face на macOS и Linux.
 #   ./run.sh "/путь/к/папке/с/фото" [--limit N] [--output папка] [--no-contact-sheet]
+#   ./run.sh "/папка/1" "/папка/2" ...  — несколько папок: у каждой своя подпапка best_face_output
 #   ./run.sh "/путь/к/manual_choices.json"   — применить ручной выбор из контактного листа
 # Без аргументов откроется диалог выбора папки (macOS/zenity/kdialog) или запрос в консоли.
 # При первом запуске создаётся окружение .venv и ставятся зависимости.
@@ -47,11 +48,11 @@ if ! cmp -s requirements.txt .venv/requirements.installed; then
     cp requirements.txt .venv/requirements.installed
 fi
 
-# ── Папка с фото ─────────────────────────────────────────────────────────────
-SRC="${1:-}"
-if [ $# -gt 0 ]; then shift; fi
-
-if [ -z "$SRC" ]; then
+# ── Папки с фото ─────────────────────────────────────────────────────────────
+# Можно передать несколько папок и/или manual_choices.json; результат каждой папки
+# сохраняется в её подпапке best_face_output.
+if [ $# -eq 0 ]; then
+    SRC=""
     if [ "$(uname)" = "Darwin" ]; then
         SRC="$(osascript -e 'POSIX path of (choose folder with prompt "Папка с фотографиями")' 2>/dev/null || true)"
     elif command -v zenity >/dev/null 2>&1; then
@@ -59,25 +60,42 @@ if [ -z "$SRC" ]; then
     elif command -v kdialog >/dev/null 2>&1; then
         SRC="$(kdialog --getexistingdirectory "$HOME" 2>/dev/null || true)"
     fi
-fi
-if [ -z "$SRC" ]; then
-    read -r -p "Путь к папке с фотографиями: " SRC
+    if [ -z "$SRC" ]; then
+        read -r -p "Путь к папке с фотографиями: " SRC
+    fi
+    if [ -z "$SRC" ]; then
+        echo "Папка не указана."
+        pause; exit 1
+    fi
+    set -- "$SRC"
 fi
 
-SRC="${SRC/#\~/$HOME}"
-case "$SRC" in
-    /*) ;;
-    *) SRC="$START_DIR/$SRC" ;;
-esac
-if [ "${#SRC}" -gt 1 ]; then SRC="${SRC%/}"; fi
-
-if [ ! -e "$SRC" ]; then
-    echo "Не найдена папка или файл: $SRC"
-    pause; exit 1
-fi
+# Относительные пути считаем от папки, где запустили скрипт; ключи (--limit, ...) не трогаем.
+ARGS=()
+PREV=""
+for a in "$@"; do
+    case "$a" in
+        --*) ;;
+        *)
+            a="${a/#\~/$HOME}"
+            case "$PREV" in
+                --limit) ;;
+                --output|--config|--choices)
+                    case "$a" in /*) ;; *) a="$START_DIR/$a" ;; esac ;;
+                *)
+                    case "$a" in
+                        /*) ;;
+                        *) [ -e "$START_DIR/$a" ] && a="$START_DIR/$a" ;;
+                    esac
+                    if [ "${#a}" -gt 1 ]; then a="${a%/}"; fi ;;
+            esac ;;
+    esac
+    ARGS+=("$a")
+    PREV="$a"
+done
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
-"$PY" best_face.py "$SRC" --open "$@"
+"$PY" best_face.py --open "${ARGS[@]}"
 RC=$?
 
 echo
