@@ -29,16 +29,15 @@ from .score import pick_best
 _KEEP_BACKUPS = 3
 
 
-def _archive_previous_best(best_dir: Path) -> None:
-    """Перенести personNNNN_* из best/ в best_prev/<время>, оставив не более _KEEP_BACKUPS копий."""
-    old_files = [p for p in best_dir.glob('person[0-9]*_*') if p.is_file()]
-    if not old_files:
-        return
+def _archive_files(best_dir: Path, files: list) -> Optional[Path]:
+    """Перенести файлы в best_prev/<время> рядом с best/, оставив не более _KEEP_BACKUPS копий."""
+    if not files:
+        return None
     prev_root = best_dir.parent / (best_dir.name + '_prev')
     dest = prev_root / time.strftime('%Y%m%d_%H%M%S')
     dest.mkdir(parents=True, exist_ok=True)
     moved = 0
-    for p in old_files:
+    for p in files:
         try:
             shutil.move(str(p), str(dest / p.name))
             moved += 1
@@ -48,6 +47,27 @@ def _archive_previous_best(best_dir: Path) -> None:
     backups = sorted(d for d in prev_root.iterdir() if d.is_dir())
     for d in backups[:-_KEEP_BACKUPS]:
         shutil.rmtree(d, ignore_errors=True)
+    return dest
+
+
+def _archive_previous_best(best_dir: Path) -> None:
+    """Перенести personNNNN_* из best/ в best_prev/<время>."""
+    _archive_files(best_dir, [p for p in best_dir.glob('person[0-9]*_*') if p.is_file()])
+
+
+def swap_best_photo(best_dir: str, old_file: str, src: str, new_name: str) -> str:
+    """
+    Заменить в best/ один файл: прежний уходит в best_prev/<время>, остальные (в том числе
+    переименованные вручную) не трогаются. Возвращает путь нового файла.
+    """
+    best = Path(best_dir)
+    best.mkdir(parents=True, exist_ok=True)
+    old = Path(old_file)
+    if old.is_file():
+        _archive_files(best, [old])
+    dst = best / new_name
+    shutil.copy2(src, dst)
+    return str(dst)
 
 
 def copy_best_photos(

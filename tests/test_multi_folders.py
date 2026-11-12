@@ -17,7 +17,7 @@ def _args(**kw):
 def test_default_output_is_none_so_each_folder_uses_its_own_subfolder(tmp_path):
     a = tmp_path / 'A (1)'
     a.mkdir()
-    assert resolve_job(str(a), _args(), set(), multi=True) == (str(a), None, None)
+    assert resolve_job(str(a), _args(), set(), multi=True) == (str(a), None, None, None)
 
 
 def test_output_for_many_folders_gets_unique_subfolders(tmp_path):
@@ -46,7 +46,7 @@ def test_json_among_folders_brings_its_own_folders_and_choices(tmp_path):
     js = tmp_path / 'manual_choices.json'
     js.write_text(json.dumps({'input_dir': str(photos), 'output_dir': str(out),
                               'choices': {'1': 'a.jpg'}}), encoding='utf-8')
-    assert resolve_job(str(js), _args(), set(), multi=True) == (str(photos), str(out), str(js))
+    assert resolve_job(str(js), _args(), set(), multi=True) == (str(photos), str(out), str(js), None)
 
 
 def test_not_a_folder_nor_json_is_a_folder_error(tmp_path):

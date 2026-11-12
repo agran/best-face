@@ -15,6 +15,7 @@ best_face.py — главный скрипт отбора лучших фото 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -44,7 +45,7 @@ from pipeline.exif    import read_shot_time
 from pipeline.score   import score_cluster, pick_best, mark_manual
 from download_models import MODELS, ensure_model
 from pipeline.export  import (
-    copy_best_photos, build_report, save_report, build_contact_sheet
+    copy_best_photos, swap_best_photo, build_report, save_report, build_contact_sheet
 )
 
 _SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
@@ -239,14 +240,18 @@ def process_one(
     return rec
 
 
-def apply_manual_choices(path: str, scored_by_cluster: list) -> None:
+def apply_manual_choices(source, scored_by_cluster: list) -> None:
     """
-    Применить manual_choices.json ({"choices": {id: имя_файла}}).
+    Применить ручной выбор: путь к manual_choices.json ({"choices": {id: имя_файла}})
+    или готовый словарь {id: имя_файла}.
     Привязка идёт по имени файла, а не по номеру персоны, поэтому выбор остаётся
     верным, даже если после смены настроек нумерация изменилась.
     """
-    with open(path, 'r', encoding='utf-8') as f:
-        choices = json.load(f).get('choices', {})
+    if isinstance(source, dict):
+        choices = source
+    else:
+        with open(source, 'r', encoding='utf-8') as f:
+            choices = json.load(f).get('choices', {})
 
     file_to_cluster = {}
     for ci, scored in enumerate(scored_by_cluster):
@@ -405,24 +410,113 @@ class Models:
         print(f'Модели загружены за {time.time()-t0:.1f}s')
 
 
+_BEST_NAME_RE = re.compile(r'^person(\d+)_(.+)$', re.IGNORECASE)
+
+
+def plan_swap(path: str) -> dict:
+    """
+    Файл из best/ (personNNNN_имя.jpg) перетащен на скрипт: человек выбран неудачно, нужен
+    следующий по рейтингу кадр. Рейтинг берётся из report.json рядом с best/.
+    Возвращает описание замены; бросает FolderError, если файл не подходит.
+    """
+    p = Path(path).resolve()
+    m = _BEST_NAME_RE.match(p.name)
+    report_file = p.parent.parent / 'report.json'
+    if not m or not report_file.is_file():
+        raise FolderError(
+            f'{path}: ожидалась папка с фото, manual_choices.json или файл вида personNNNN_*.jpg '
+            f'из папки best/ (рядом с ней должен лежать report.json)')
+    try:
+        report = json.loads(report_file.read_text(encoding='utf-8'))
+        persons = report['persons']
+    except (OSError, ValueError, KeyError) as e:
+        raise FolderError(f'не удалось прочитать {report_file}: {e}')
+
+    pid = int(m.group(1))
+    person = next((x for x in persons if x['person_id'] == pid), None)
+    if person is None:
+        raise FolderError(f'в {report_file} нет человека №{pid}')
+    names = [f['file'] for f in person['frames']]
+    rest = m.group(2)
+    # Файл мог быть переименован вручную (personNNNN_Иванов_P123.jpg, personNNNN_P123 11 Иванов.jpg):
+    # исходное имя ищем по номеру кадра (имя без расширения) внутри нового имени
+    current, pos = None, -1
+    for n in sorted(names, key=len, reverse=True):
+        at = rest.find(os.path.splitext(n)[0])
+        if at >= 0:
+            current, pos = n, at
+            break
+    if current is None:
+        current = person.get('best_photo')
+    if current not in names:
+        raise FolderError(f'кадр {rest} не найден среди кадров человека №{pid} в отчёте')
+    nxt = names.index(current) + 1
+    if nxt >= len(names):
+        raise FolderError(f'у человека №{pid} нет других кадров: {current} — последний в рейтинге')
+    new_file = names[nxt]
+    if pos >= 0:
+        old_stem, new_stem = os.path.splitext(current)[0], os.path.splitext(new_file)[0]
+        new_rest = rest[:pos] + new_stem + rest[pos + len(old_stem):]
+        old_ext, new_ext = os.path.splitext(current)[1], os.path.splitext(new_file)[1]
+        if old_ext.lower() != new_ext.lower() and new_rest.lower().endswith(old_ext.lower()):
+            new_rest = new_rest[:len(new_rest) - len(old_ext)] + new_ext
+    else:
+        new_rest = new_file
+    input_dir = (report.get('params') or {}).get('input_dir')
+    if not input_dir or not os.path.isdir(input_dir):
+        raise FolderError(f'папка с фото из отчёта недоступна: {input_dir}')
+    choices = {str(x['person_id']): x['best_photo']
+               for x in persons if x.get('manual_choice') and x.get('best_photo')}
+    choices[str(pid)] = new_file
+    return {
+        'input_dir': input_dir,
+        'output': str(p.parent.parent),
+        'choices': choices,
+        'person_id': pid,
+        'old_path': str(p),
+        'new_file': new_file,
+        'new_name': f'person{m.group(1)}_{new_rest}',
+        # нумерация должна остаться прежней: на неё опираются переименования в best/
+        'ids': {x['person_id']: frozenset(f['file'] for f in x['frames']) for x in persons},
+    }
+
+
+def keep_person_ids(clusters: list, ids: dict) -> list:
+    """Порядок кластеров, при котором person_id совпадают с прежним отчётом (None — не сходится)."""
+    by_files = {files: pid for pid, files in ids.items()}
+    order = []
+    for i, c in enumerate(clusters):
+        pid = by_files.get(frozenset(os.path.basename(f.path) for f in c.frames))
+        if pid is None:
+            return None
+        order.append((pid, i))
+    if len(order) != len(ids) or len({pid for pid, _ in order}) != len(order):
+        return None
+    return [i for _, i in sorted(order)]
+
+
 def resolve_job(item: str, args, used_names: set, multi: bool):
-    """Что обрабатывать для одного перетащенного пути: (папка с фото, папка результатов, файл выбора).
+    """Что обрабатывать для одного перетащенного пути: (папка с фото, папка результатов, выбор, замена).
 
     Результаты каждой папки по умолчанию лежат в её подпапке best_face_output.
     """
     choices = args.choices
-    input_dir, output = item, None
+    input_dir, output, swap = item, None, None
     # Файл ручного выбора вместо папки: всё нужное (папка с фото, папка результатов)
     # записано в нём самом — достаточно перетащить его на run.bat
-    if os.path.isfile(item):
-        if not item.lower().endswith('.json'):
-            raise FolderError(f'ожидалась папка с фото или файл manual_choices.json, получено: {item}')
+    if os.path.isfile(item) and item.lower().endswith('.json'):
         try:
             input_dir, output = unpack_choices_file(item)
         except ValueError as e:
             raise FolderError(str(e))
         print(f'Применяю ручной выбор из {item}')
         choices = choices or item
+    elif os.path.isfile(item):
+        swap = plan_swap(item)
+        input_dir, output, choices = swap['input_dir'], swap['output'], swap['choices']
+        print(f'Заменяю выбранный кадр человека №{swap["person_id"]} на следующий по рейтингу: '
+              f'{swap["new_file"]}')
+        return input_dir, output, choices, swap
     if args.output:
         # Для нескольких папок --output — общий родитель, у каждой папки своя подпапка
         if multi:
@@ -435,10 +529,10 @@ def resolve_job(item: str, args, used_names: set, multi: bool):
             output = os.path.join(args.output, unique)
         else:
             output = args.output
-    return input_dir, output, choices
+    return input_dir, output, choices, swap
 
 
-def process_folder(input_dir: str, output, choices, args, cfg: dict, get_models):
+def process_folder(input_dir: str, output, choices, args, cfg: dict, get_models, swap=None):
     """Обработать одну папку; возвращает summary отчёта (None — в папке нет фото)."""
     if output:
         base = output
@@ -611,12 +705,21 @@ def process_folder(input_dir: str, output, choices, args, cfg: dict, get_models)
         apply_manual_choices(choices, scored_by_cluster)
 
     # Нумерация персон — в порядке исходной папки: по номеру файла лучшего кадра,
-    # чтобы порядок person0001, person0002... в best/ совпадал с порядком съёмки
-    order = sorted(
-        range(len(clusters)),
-        key=lambda i: (pick_best(scored_by_cluster[i])['frame'].file_idx
-                       if scored_by_cluster[i] else clusters[i].frames[0].file_idx),
-    )
+    # чтобы порядок person0001, person0002... в best/ совпадал с порядком съёмки.
+    # При замене одного кадра нумерация, наоборот, остаётся прежней.
+    if swap:
+        order = keep_person_ids(clusters, swap['ids'])
+        if order is None:
+            raise FolderError(
+                'группы людей изменились с прошлого запуска (другие настройки или фото), '
+                'поэтому заменить один кадр без перенумерации нельзя. '
+                'Запустите программу на папке с фото целиком.')
+    else:
+        order = sorted(
+            range(len(clusters)),
+            key=lambda i: (pick_best(scored_by_cluster[i])['frame'].file_idx
+                           if scored_by_cluster[i] else clusters[i].frames[0].file_idx),
+        )
     clusters = [clusters[i] for i in order]
     scored_map = {}
     for new_id, i in enumerate(order, start=1):
@@ -649,12 +752,20 @@ def process_folder(input_dir: str, output, choices, args, cfg: dict, get_models)
     report = build_report(clusters, scored_map, rejected_records, params,
                           close_call_margin=cfg_scoring.get('close_call_margin', 0.02),
                           close_call_max_pool=cfg_scoring.get('close_call_max_pool', 6))
-    save_report(report, report_file)
-    print(f'  Отчёт: {report_file}')
-
-    copy_best_photos(clusters, scored_map, best_dir, rejected_dir, rejected_records)
-    print(f'  Лучшие фото: {best_dir}')
-    print(f'  Отклонённые: {rejected_dir}')
+    if swap:
+        chosen = pick_best(scored_map[swap['person_id']])
+        if not chosen or os.path.basename(chosen['frame'].path) != swap['new_file']:
+            raise FolderError(f'не удалось выбрать кадр {swap["new_file"]}, файлы не изменены')
+        save_report(report, report_file)
+        print(f'  Отчёт: {report_file}')
+        new_path = swap_best_photo(best_dir, swap['old_path'], chosen['frame'].path, swap['new_name'])
+        print(f'  Заменено: {os.path.basename(swap["old_path"])} → {os.path.basename(new_path)}')
+    else:
+        save_report(report, report_file)
+        print(f'  Отчёт: {report_file}')
+        copy_best_photos(clusters, scored_map, best_dir, rejected_dir, rejected_records)
+        print(f'  Лучшие фото: {best_dir}')
+        print(f'  Отклонённые: {rejected_dir}')
 
     if contact_file:
         print(f'  Контактный лист (может занять время): {contact_file}')
@@ -694,7 +805,8 @@ def main():
     parser.add_argument('inputs', nargs='+', metavar='input',
                         help='Одна или несколько папок с фотографиями и/или файлы manual_choices.json '
                              'из контактного листа (папки берутся из файла, ручной выбор применяется '
-                             'автоматически). Результат каждой папки — в её подпапке best_face_output')
+                             'автоматически). Результат каждой папки — в её подпапке best_face_output. '
+                             'Файл personNNNN_*.jpg из best/ заменяется следующим по рейтингу кадром человека')
     parser.add_argument('--config',  default=str(Path(__file__).parent / 'config.yaml'),
                         help='Путь к config.yaml')
     parser.add_argument('--output',  default=None,
@@ -745,8 +857,8 @@ def main():
         if multi:
             print(f'\n{"#"*60}\n# Папка {n} из {len(args.inputs)}: {item}\n{"#"*60}')
         try:
-            input_dir, output, choices = resolve_job(item, args, used_names, multi)
-            summary = process_folder(input_dir, output, choices, args, cfg, get_models)
+            input_dir, output, choices, swap = resolve_job(item, args, used_names, multi)
+            summary = process_folder(input_dir, output, choices, args, cfg, get_models, swap)
             outcomes.append((item, summary, None))
         except FolderError as e:
             print(f'ОШИБКА: {e}')
